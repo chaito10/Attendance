@@ -153,6 +153,7 @@
   .percent-badge.ok{ background: rgba(61,107,74,0.15); color: var(--good); }
   .percent-badge.low{ background: rgba(163,57,44,0.14); color: var(--stamp-dark); }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
   <div class="book">
@@ -403,348 +404,377 @@
     }
   }
 
-  // ---------- GitHub Pages / GitHub repository sync ----------
-  // Pages is the static/public read layer. The GitHub Contents API is used
-  // only by devices that have a token to publish. Readers can discover peers
-  // directly from the public repository API as a fallback, so Pages cache
-  // propagation cannot make an otherwise registered peer invisible.
+  // ---------- 100% client-side QR WebRTC signaling ----------
+  // No GitHub API, Firebase, database, peer directory, or signaling server.
+  // The teacher creates a WebRTC offer and displays it as a QR code.
+  // A phone scans the offer, creates an answer and displays an answer QR.
+  // The teacher scans the answer QR. After that, attendance data travels
+  // directly over the WebRTC data channel.
+  var qrPeers = {};
+  var qrHostConnection = null;
+  var qrHostChannel = null;
+  var qrPendingOffer = null;
+  var qrPendingAnswer = null;
+  var qrRole = null;
 
-  async function githubApi(url){
-    var res = await fetch(url, {
-      cache: 'no-store',
-      headers: { 'Accept': 'application/vnd.github+json' }
-    });
-    if (!res.ok) throw new Error('GitHub API HTTP ' + res.status);
-    return res.json();
-  }
-
-  function githubContentsUrl(path){
-    var c = getPeerConfig();
-    return 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
-      '/' + encodeURIComponent(c.repo) + '/contents/' + path +
-      '?ref=' + encodeURIComponent(c.branch) + '&t=' + Date.now();
-  }
-
-  function decodeGithubContent(content){
-    var raw = atob(String(content || '').replace(/\n/g, ''));
-    return decodeURIComponent(escape(raw));
-  }
-
-  async function readPublishedPeers(){
-    var c = getPeerConfig();
-    if (!c.owner || !c.repo) return [];
-
-    // Primary: GitHub Pages static file.
-    if (c.pages){
-      try{
-        var pageRes = await fetch(c.pages + '/peers.json?v=' + Date.now(), {cache:'no-store'});
-        if (pageRes.ok){
-          var pagePeers = await pageRes.json();
-          if (Array.isArray(pagePeers)) return pagePeers;
-        }
-      }catch(e){ console.warn('Pages peer directory unavailable', e); }
+  function bytesToBase64(bytes){
+    var binary = '';
+    for (var i=0;i<bytes.length;i+=0x8000){
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i+0x8000));
     }
+    return btoa(binary);
+  }
 
-    // Fallback: public GitHub repository contents API.
-    try{
-      var listing = await githubApi(githubContentsUrl('peers'));
-      if (!Array.isArray(listing)) return [];
-      var peers = [];
-      for (var i=0;i<listing.length;i++){
-        if (!listing[i] || !listing[i].download_url) continue;
-        try{
-          var r = await fetch(listing[i].download_url + '?v=' + Date.now(), {cache:'no-store'});
-          if (r.ok) peers.push(await r.json());
-        }catch(e){}
+  function base64ToBytes(str){
+    var binary = atob(str);
+    var out = new Uint8Array(binary.length);
+    for (var i=0;i<binary.length;i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  function qrEncode(obj){
+    return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+  }
+
+  function qrDecode(str){
+    return JSON.parse(decodeURIComponent(escape(atob(str.trim()))));
+  }
+
+  function qrIceConfig(){
+    // Public STUN only helps WebRTC find a direct route; no attendance
+    // payload is sent through it.
+    return {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    };
+  }
+
+  function waitIceComplete(pc, timeout){
+    return new Promise(function(resolve){
+      if (pc.iceGatheringState === 'complete'){
+        resolve();
+        return;
       }
-      return peers;
+      var done = false;
+      function finish(){
+        if (done) return;
+        done = true;
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+      function check(){
+        if (pc.iceGatheringState === 'complete') finish();
+      }
+      pc.addEventListener('icegatheringstatechange', check);
+      setTimeout(finish, timeout || 8000);
+    });
+  }
+
+  function makeSignalPayload(type, pc){
+    return {
+      v: 1,
+      app: 'attendance-qr-p2p',
+      type: type,
+      room: ROOM_ID,
+      from: getDeviceId(),
+      description: pc.localDescription ? {
+        type: pc.localDescription.type,
+        sdp: pc.localDescription.sdp
+      } : null
+    };
+  }
+
+  function getDeviceId(){
+    try{
+      var k = 'attendance_device_id_v2';
+      var v = localStorage.getItem(k);
+      if (!v){
+        v = 'peer_' + crypto.randomUUID();
+        localStorage.setItem(k, v);
+      }
+      return v;
     }catch(e){
-      console.warn('GitHub peer directory unavailable', e);
-      return [];
+      return 'peer_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
     }
   }
 
-  async function publishPeerRecord(){
-    var token = '';
-    try { token = localStorage.getItem('attendance_github_token_v1') || ''; } catch(e){}
-    var c = getPeerConfig();
-    if (!c.owner || !c.repo || !token) return false;
+  function setQrStatus(text){
+    var el = document.getElementById('qrSyncStatus');
+    if (el) el.textContent = text;
+  }
 
-    var peer = {
-      id: deviceId,
-      room: ROOM_ID,
-      url: window.location.href.split('#')[0],
-      lastSeen: new Date().toISOString(),
-      userAgent: navigator.userAgent.slice(0,120)
+  function renderQrCode(text, targetId){
+    var el = document.getElementById(targetId);
+    if (!el) return;
+    el.innerHTML = '';
+    if (!text) return;
+
+    if (window.QRCode){
+      new QRCode(el, {
+        text: text,
+        width: 300,
+        height: 300,
+        correctLevel: QRCode.CorrectLevel.M
+      });
+      return;
+    }
+
+    // Fallback: show the payload in a selectable box if QR library fails.
+    var pre = document.createElement('textarea');
+    pre.readOnly = true;
+    pre.value = text;
+    pre.style.width = '100%';
+    pre.style.minHeight = '180px';
+    el.appendChild(pre);
+  }
+
+  function showQrModal(title, instruction, payload, mode){
+    var modal = document.getElementById('qrSignalModal');
+    if (!modal) return;
+    document.getElementById('qrSignalTitle').textContent = title;
+    document.getElementById('qrSignalInstruction').textContent = instruction;
+    document.getElementById('qrSignalMode').textContent = mode || '';
+    renderQrCode(payload, 'qrSignalCode');
+    modal.style.display = 'flex';
+  }
+
+  function closeQrModal(){
+    var modal = document.getElementById('qrSignalModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function setupChannel(channel, peerId){
+    qrHostChannel = channel;
+    qrPeers[peerId] = { channel: channel, connectedAt: Date.now() };
+
+    channel.onopen = function(){
+      peerCount = Object.keys(qrPeers).filter(function(id){
+        return qrPeers[id].channel && qrPeers[id].channel.readyState === 'open';
+      }).length;
+      updatePeerBadge();
+      setQrStatus(peerCount + ' peer' + (peerCount === 1 ? '' : 's') + ' connected');
+      try{
+        channel.send(JSON.stringify({
+          type:'snapshot',
+          room:ROOM_ID,
+          dump:bytesToBase64(db.export())
+        }));
+      }catch(e){}
     };
 
-    var path = 'peers/' + encodeURIComponent(deviceId) + '.json';
-    var api = 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
-      '/' + encodeURIComponent(c.repo) + '/contents/' + path;
+    channel.onclose = function(){
+      delete qrPeers[peerId];
+      peerCount = Object.keys(qrPeers).length;
+      updatePeerBadge();
+      setQrStatus('peer disconnected');
+    };
 
-    try{
-      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json'
-        }
-      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
+    channel.onerror = function(e){
+      console.warn('WebRTC data channel error', e);
+    };
 
-      var body = JSON.stringify(peer, null, 2);
-      var b64 = btoa(unescape(encodeURIComponent(body)));
-      var payload = {
-        message:'Register/update attendance peer ' + deviceId,
-        content:b64,
-        branch:c.branch
-      };
-      if (current && current.sha) payload.sha = current.sha;
-
-      var put = await fetch(api, {
-        method:'PUT',
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json',
-          'Content-Type':'application/json'
-        },
-        body:JSON.stringify(payload)
-      });
-      if (!put.ok){
-        var errText = '';
-        try { errText = await put.text(); } catch(e){}
-        var detail = '';
-        try {
-          var ej = JSON.parse(errText);
-          detail = ej.message || '';
-        } catch(e){}
-        throw new Error('GitHub peer registration HTTP ' + put.status + (detail ? ': ' + detail : ''));
-      }
-
-      // Maintain peers.json as a convenience for GitHub Pages readers.
-      // Peer discovery does NOT depend on this file because the repository
-      // API fallback above reads the individual peer records directly.
-      await updatePublishedPeerIndex(peer, token).catch(function(e){
-        console.warn('peers.json update skipped:', e);
-      });
-      return true;
-    }catch(e){
-      console.warn('peer registration failed', e);
-      return false;
-    }
-  }
-
-  async function updatePublishedPeerIndex(peer, token){
-    var c = getPeerConfig();
-    var api = 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
-      '/' + encodeURIComponent(c.repo) + '/contents/peers.json';
-
-    try{
-      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json'
-        }
-      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
-
-      var peers = [];
-      if (current && current.content){
-        try{
-          peers = JSON.parse(decodeGithubContent(current.content));
-          if (!Array.isArray(peers)) peers = [];
-        }catch(e){ peers = []; }
-      }
-
-      var replaced = false;
-      peers = peers.map(function(x){
-        if (x && x.id === peer.id){ replaced = true; return peer; }
-        return x;
-      });
-      if (!replaced) peers.push(peer);
-
-      var cutoff = Date.now() - 30*24*60*60*1000;
-      peers = peers.filter(function(x){
-        return x && x.id && x.lastSeen &&
-          new Date(x.lastSeen).getTime() >= cutoff;
-      });
-
-      var body = JSON.stringify(peers, null, 2);
-      var payload = {
-        message:'Update attendance peer directory',
-        content:btoa(unescape(encodeURIComponent(body))),
-        branch:c.branch
-      };
-      if (current && current.sha) payload.sha = current.sha;
-
-      var put = await fetch(api, {
-        method:'PUT',
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json',
-          'Content-Type':'application/json'
-        },
-        body:JSON.stringify(payload)
-      });
-      if (!put.ok) throw new Error('peers.json HTTP ' + put.status);
-      return true;
-    }catch(e){
-      throw e;
-    }
-  }
-
-  async function discoverPeers(){
-    var peers = await readPublishedPeers();
-    var cutoff = Date.now() - 2 * 60 * 1000;
-    var active = peers.filter(function(p){
-      return p && p.room === ROOM_ID && p.id !== deviceId &&
-        p.lastSeen && new Date(p.lastSeen).getTime() > cutoff;
-    });
-
-    refreshPeerStatus(active.length, active.length
-      ? active.length + ' peer' + (active.length === 1 ? '' : 's') + ' connected'
-      : 'no connected peers');
-
-    return active;
-  }
-
-  async function publishPublicState(){
-    var token = '';
-    try { token = localStorage.getItem('attendance_github_token_v1') || ''; } catch(e){}
-    var c = getPeerConfig();
-    if (!c.owner || !c.repo || !token || !db) return false;
-
-    var path = 'state/' + encodeURIComponent(deviceId) + '.bin.json';
-    var api = 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
-      '/' + encodeURIComponent(c.repo) + '/contents/' + path;
-
-    try{
-      var envelope = {
-        id:deviceId,
-        room:ROOM_ID,
-        updatedAt:new Date().toISOString(),
-        sqlite:Array.from(db.export())
-      };
-      var body = JSON.stringify(envelope);
-      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json'
-        }
-      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
-
-      var payload = {
-        message:'Publish attendance state ' + deviceId,
-        content:btoa(unescape(encodeURIComponent(body))),
-        branch:c.branch
-      };
-      if (current && current.sha) payload.sha = current.sha;
-
-      var put = await fetch(api, {
-        method:'PUT',
-        cache:'no-store',
-        headers:{
-          'Authorization':'Bearer ' + token,
-          'Accept':'application/vnd.github+json',
-          'Content-Type':'application/json'
-        },
-        body:JSON.stringify(payload)
-      });
-      if (!put.ok) throw new Error('state publish HTTP ' + put.status);
-      return true;
-    }catch(e){
-      console.warn('state publish failed', e);
-      return false;
-    }
-  }
-
-  async function readPeerState(peer){
-    var c = getPeerConfig();
-    var path = 'state/' + encodeURIComponent(peer.id) + '.bin.json';
-
-    // Primary: Pages.
-    if (c.pages){
+    channel.onmessage = function(event){
       try{
-        var r = await fetch(c.pages + '/' + path + '?v=' + Date.now(), {cache:'no-store'});
-        if (r.ok) return await r.json();
-      }catch(e){}
-    }
+        var msg = JSON.parse(event.data);
+        if (!msg || msg.room !== ROOM_ID) return;
 
-    // Fallback: public GitHub repository contents API.
+        if (msg.type === 'snapshot' && msg.dump){
+          mergeExternalDump(base64ToBytes(msg.dump));
+          render();
+          return;
+        }
+
+        if (msg.type === 'mutation' && msg.mutation){
+          applyMutationLocally(msg.mutation);
+          render();
+        }
+      }catch(e){
+        console.warn('invalid peer message', e);
+      }
+    };
+  }
+
+  async function createQrOffer(){
+    qrRole = 'host';
+    var pc = new RTCPeerConnection(qrIceConfig());
+    qrHostConnection = pc;
+
+    var peerId = 'pending_' + Date.now();
+    var channel = pc.createDataChannel('attendance', { ordered:true });
+    setupChannel(channel, peerId);
+
+    pc.onconnectionstatechange = function(){
+      if (pc.connectionState === 'connected'){
+        closeQrModal();
+        setQrStatus('peer connected');
+      }else if (pc.connectionState === 'failed' ||
+                pc.connectionState === 'disconnected' ||
+                pc.connectionState === 'closed'){
+        setQrStatus('peer connection closed');
+      }
+    };
+
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitIceComplete(pc, 10000);
+
+    var payload = makeSignalPayload('offer', pc);
+    qrPendingOffer = payload;
+
+    showQrModal(
+      'Step 1 — Scan this QR',
+      'On the student phone, open Attendance → Join session and scan this QR. The phone will then show an answer QR.',
+      qrEncode(payload),
+      'HOST OFFER'
+    );
+
+    return payload;
+  }
+
+  async function acceptQrOffer(encoded){
+    var offer;
     try{
-      var obj = await githubApi(githubContentsUrl(path));
-      return JSON.parse(decodeGithubContent(obj.content));
+      offer = typeof encoded === 'string' ? qrDecode(encoded) : encoded;
     }catch(e){
-      console.warn('could not read peer state', peer.id, e);
-      return null;
+      toast('Invalid QR payload');
+      return;
+    }
+
+    if (!offer || offer.app !== 'attendance-qr-p2p' ||
+        offer.type !== 'offer' || offer.room !== ROOM_ID){
+      toast('This QR is not for this attendance session');
+      return;
+    }
+
+    qrRole = 'student';
+    var pc = new RTCPeerConnection(qrIceConfig());
+    qrHostConnection = pc;
+
+    pc.ondatachannel = function(event){
+      setupChannel(event.channel, offer.from || 'host');
+    };
+
+    pc.onconnectionstatechange = function(){
+      if (pc.connectionState === 'connected'){
+        closeQrModal();
+        setQrStatus('connected to host');
+      }else if (pc.connectionState === 'failed' ||
+                pc.connectionState === 'disconnected' ||
+                pc.connectionState === 'closed'){
+        setQrStatus('connection closed');
+      }
+    };
+
+    try{
+      await pc.setRemoteDescription(offer.description);
+      var answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitIceComplete(pc, 10000);
+
+      qrPendingAnswer = makeSignalPayload('answer', pc);
+      showQrModal(
+        'Step 2 — Show answer QR',
+        'Show this QR to the teacher. The teacher should scan it from the Join/Sync controls.',
+        qrEncode(qrPendingAnswer),
+        'STUDENT ANSWER'
+      );
+    }catch(e){
+      console.error(e);
+      toast('Could not create WebRTC answer');
     }
   }
 
-  async function pullPublicStates(){
-    if (!db) return;
-    var peers = await discoverPeers();
-    var merged = 0;
-
-    for (var i=0;i<peers.length;i++){
-      var envelope = await readPeerState(peers[i]);
-      if (!envelope || envelope.room !== ROOM_ID ||
-          !Array.isArray(envelope.sqlite)) continue;
-      mergeExternalDump(new Uint8Array(envelope.sqlite));
-      merged++;
+  async function acceptQrAnswer(encoded){
+    var answer;
+    try{
+      answer = typeof encoded === 'string' ? qrDecode(encoded) : encoded;
+    }catch(e){
+      toast('Invalid answer QR');
+      return;
     }
 
-    render();
-    return merged;
+    if (!qrHostConnection ||
+        !answer ||
+        answer.app !== 'attendance-qr-p2p' ||
+        answer.type !== 'answer' ||
+        answer.room !== ROOM_ID){
+      toast('Answer does not match the open session');
+      return;
+    }
+
+    try{
+      await qrHostConnection.setRemoteDescription(answer.description);
+      closeQrModal();
+      setQrStatus('connecting to peer…');
+    }catch(e){
+      console.error(e);
+      toast('Could not accept answer');
+    }
   }
 
-  async function syncViaGithub(){
-    if (!githubConfigured) return {registered:false, published:false, peers:0};
-    var registered = await publishPeerRecord();
-    var published = await publishPublicState();
-    var peers = await discoverPeers();
-    await pullPublicStates();
-    return {registered:registered, published:published, peers:peers.length};
+  function broadcastMutation(m){
+    Object.keys(qrPeers).forEach(function(id){
+      var ch = qrPeers[id] && qrPeers[id].channel;
+      if (!ch || ch.readyState !== 'open') return;
+      try{
+        ch.send(JSON.stringify({
+          type:'mutation',
+          room:ROOM_ID,
+          mutation:m
+        }));
+      }catch(e){}
+    });
+  }
+
+  function startQrJoin(){
+    if (qrRole === 'host'){
+      toast('Use the host QR or scan a student answer');
+      return;
+    }
+    document.getElementById('qrJoinInput').click();
+  }
+
+  function handleQrText(text){
+    if (!text) return;
+    var payload;
+    try{ payload = qrDecode(text); }
+    catch(e){ toast('Invalid QR data'); return; }
+
+    if (payload.type === 'offer') acceptQrOffer(text);
+    else if (payload.type === 'answer') acceptQrAnswer(text);
+    else toast('Unknown attendance QR');
+  }
+
+  function openQrScanner(){
+    var input = document.getElementById('qrJoinInput');
+    if (!input) return;
+    input.click();
   }
 
   function connectRoom(){
     deviceId = getDeviceId();
-    var c = getPeerConfig();
-    githubConfigured = !!(c.owner && c.repo && c.pages);
+    peerCount = 0;
+    updatePeerBadge();
+    setQrStatus('client-side QR mode — no server required');
 
-    if (!githubConfigured){
-      refreshPeerStatus(0, 'configure GitHub Pages sync');
-      forceResync = function(){ toast('Configure GitHub Pages sync first'); };
-      return;
-    }
-
-    function runSync(showToast){
-      syncViaGithub().then(function(result){
-        if (showToast){
-          if (!result.registered){
-            toast('GitHub registration failed — check token/repo');
-          } else if (result.peers === 0){
-            toast('Registered, but no other active peer found');
-          } else {
-            toast('Synced with ' + result.peers + ' peer' + (result.peers === 1 ? '' : 's'));
-          }
+    // No persistent connection is opened here. The teacher explicitly starts
+    // a QR handshake, and each student joins by scanning the host QR.
+    forceResync = function(){
+      Object.keys(qrPeers).forEach(function(id){
+        var ch = qrPeers[id] && qrPeers[id].channel;
+        if (ch && ch.readyState === 'open'){
+          try{
+            ch.send(JSON.stringify({
+              type:'snapshot',
+              room:ROOM_ID,
+              dump:bytesToBase64(db.export())
+            }));
+          }catch(e){}
         }
-      }).catch(function(e){
-        console.error('sync failed', e);
-        refreshPeerStatus(0, 'sync error — check GitHub settings');
-        if (showToast) toast('Sync failed — check GitHub settings');
       });
-    }
-
-    runSync(false);
-    clearInterval(syncTimer);
-    syncTimer = setInterval(function(){ runSync(false); }, SYNC_INTERVAL_MS);
-
-    broadcastMutation = function(){
-      runSync(false);
+      toast('Peer snapshot sent');
     };
-    forceResync = function(){ runSync(true); };
   }
 
   // ---------- shared render helpers ----------
@@ -946,16 +976,7 @@
     html += '<div class="row"><label class="field">New PIN<input type="text" id="newPin" placeholder="' + escapeHtml(getSetting('pin','0000')) + '"></label>';
     html += '<button class="btn secondary" id="savePin" style="align-self:flex-end;">Save PIN</button></div>';
     html += '</div>';
-
-    html += '<div class="card">';
-    html += '<h2 class="section">GitHub Pages peer sync</h2>';
-    html += '<div class="muted" style="margin-bottom:8px;">This deployment is preconfigured for <code>chaito10/Attendance</code>. The token stays in this browser and is never stored in the page source. It must have GitHub Contents read/write permission.</div>';
-    html += '<div class="row">';
-    html += '<label class="field">GitHub owner<input type="text" id="ghOwner" value="' + escapeHtml(GITHUB_OWNER) + '" placeholder="your-org"></label>';
-    html += '<label class="field">Repository<input type="text" id="ghRepo" value="' + escapeHtml(GITHUB_REPO) + '" placeholder="attendance-peers"></label>';
-    html += '<label class="field">Pages URL<input type="text" id="ghPages" value="' + escapeHtml(GITHUB_PAGES_BASE) + '" placeholder="https://your-org.github.io/attendance-peers"></label>';
-    html += '</div>';
-    html += '<div class="row" style="margin-top:8px;">';
+html += '<div class="row" style="margin-top:8px;">';
     html += '<label class="field">GitHub token<input type="password" id="ghToken" placeholder="fine-grained token: Contents Read/Write"></label>';
     html += '<button class="btn" id="saveGithub" style="align-self:flex-end;">Register device</button>';
     html += '<button class="btn secondary" id="githubSyncNow" style="align-self:flex-end;">Sync now</button>';
@@ -963,7 +984,26 @@
     html += '<div class="muted" style="margin-top:8px;">The repository should publish <code>peers.json</code> and the <code>state/</code> folder through GitHub Pages. For multiple devices, use one shared repository and a token on devices that need to publish.</div>';
     html += '</div>';
 
-    html += '<div class="card"><h2 class="section">Sync room</h2><div class="muted">Room code: <code>' + escapeHtml(ROOM_ID) + '</code>. The room now identifies the shared peer group; GitHub Pages provides the persistent peer directory and state snapshots instead of WebRTC tracker discovery.</div></div>';
+    html += '<div class="card">
+  <h2 class="section">QR-code peer connection</h2>
+  <div class="muted" style="margin-bottom:10px;">
+    100% client-side. No GitHub, Firebase, signaling server, or account is required.
+    The teacher shows an offer QR; each phone scans it and shows an answer QR; the
+    teacher scans the answer to establish direct WebRTC sync.
+  </div>
+  <div class="row">
+    <button class="btn" id="createHostQr">Create host QR</button>
+    <button class="btn secondary" id="scanPeerQr">Scan peer answer</button>
+    <button class="btn secondary" id="joinHostQr">Join host with QR</button>
+  </div>
+  <div id="qrSyncStatus" class="muted" style="margin-top:10px;">Ready for QR connection</div>
+  <div style="margin-top:8px;font-size:12px;" class="muted">
+    For the teacher: Create host QR → student scans → student shows answer QR → Scan peer answer.
+    For a student: Join host with QR → scan teacher's QR → show the answer QR.
+  </div>
+</div>
+
+<div class="card"><h2 class="section">Sync room</h2><div class="muted">Room code: <code>' + escapeHtml(ROOM_ID) + '</code>. The room now identifies the shared peer group; GitHub Pages provides the persistent peer directory and state snapshots instead of WebRTC tracker discovery.</div></div>';
 
     viewEl.innerHTML = html;
 
@@ -1036,56 +1076,45 @@
       });
     });
 
+    document.getElementById('createHostQr').addEventListener('click', function(){
+      createQrOffer().catch(function(e){
+        console.error(e);
+        toast('Could not create host QR');
+      });
+    });
+
+    document.getElementById('scanPeerQr').addEventListener('click', openQrScanner);
+    document.getElementById('joinHostQr').addEventListener('click', openQrScanner);
+
+    document.getElementById('qrJoinInput').addEventListener('change', async function(){
+      var file = this.files && this.files[0];
+      this.value = '';
+      if (!file) return;
+
+      // Browser QR decoding support varies. Use BarcodeDetector when available.
+      if ('BarcodeDetector' in window){
+        try{
+          var detector = new BarcodeDetector({formats:['qr_code']});
+          var bitmap = await createImageBitmap(file);
+          var codes = await detector.detect(bitmap);
+          if (codes.length) {
+            handleQrText(codes[0].rawValue);
+            return;
+          }
+        }catch(e){ console.warn('BarcodeDetector failed', e); }
+      }
+
+      // If the browser lacks native QR image decoding, show a concise fallback.
+      toast('QR image scanning is not supported by this browser. Use a browser with BarcodeDetector or paste the QR payload.');
+    });
+
     document.getElementById('savePin').addEventListener('click', function(){
       var val = document.getElementById('newPin').value.trim();
       if (!val){ toast('Enter a PIN first'); return; }
       doMutation({ type: 'SET_SETTING', key: 'pin', value: val });
       toast('PIN updated');
     });
-
-    document.getElementById('saveGithub').addEventListener('click', function(){
-      var owner = document.getElementById('ghOwner').value.trim();
-      var repo = document.getElementById('ghRepo').value.trim();
-      var pages = document.getElementById('ghPages').value.trim().replace(/\/+$/,'');
-      if (!pages) pages = 'https://' + owner + '.github.io/' + repo;
-      var token = document.getElementById('ghToken').value.trim();
-      if (!owner || !repo || !pages || !token){
-        toast('Owner, repo, Pages URL and token are required');
-        return;
-      }
-      GITHUB_OWNER = owner;
-      GITHUB_REPO = repo;
-      GITHUB_PAGES_BASE = pages;
-      try { localStorage.setItem('attendance_github_token_v1', token); } catch(e){}
-      githubConfigured = true;
-      deviceId = getDeviceId();
-      clearInterval(syncTimer);
-      syncViaGithub().then(function(result){
-        if (!result.registered){
-          toast('GitHub registration failed — check token/repo');
-          return;
-        }
-        syncTimer = setInterval(function(){
-          syncViaGithub().catch(function(e){ console.warn('periodic sync failed', e); });
-        }, SYNC_INTERVAL_MS);
-        toast(result.peers
-          ? 'Registered — ' + result.peers + ' peer found'
-          : 'Registered — waiting for another peer');
-      }).catch(function(e){
-        console.error('GitHub registration failed:', e);
-        var msg = String(e && e.message || '');
-        if (msg.indexOf('401') >= 0 || msg.indexOf('403') >= 0){
-          toast('GitHub token rejected — needs Contents write');
-        } else if (msg.indexOf('404') >= 0){
-          toast('GitHub repo/path not found');
-        } else {
-          toast('Registration failed — see browser console');
-        }
-      });
-    });
-
-    document.getElementById('githubSyncNow').addEventListener('click', function(){
-      syncViaGithub().then(function(){ toast('Synced'); })
+})
         .catch(function(){ toast('Sync failed — check GitHub settings'); });
     });
   }
@@ -1124,5 +1153,17 @@
   })();
 })();
 </script>
+
+<div id="qrSignalModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);align-items:center;justify-content:center;padding:20px;">
+  <div style="background:var(--card,#fff);color:var(--text,#111);width:min(480px,100%);max-height:92vh;overflow:auto;border-radius:16px;padding:20px;text-align:center;box-shadow:0 12px 50px rgba(0,0,0,.35);">
+    <h2 id="qrSignalTitle" style="margin-top:0;">QR WebRTC</h2>
+    <p id="qrSignalInstruction" class="muted"></p>
+    <div id="qrSignalMode" class="muted" style="font-size:12px;margin-bottom:10px;"></div>
+    <div id="qrSignalCode" style="display:flex;justify-content:center;margin:12px 0;min-height:40px;"></div>
+    <button class="btn secondary" onclick="closeQrModal()">Close</button>
+  </div>
+</div>
+<input id="qrJoinInput" type="file" accept="image/*" capture="environment" style="display:none">
+
 </body>
 </html>

@@ -336,10 +336,10 @@
   // trackers/signalling and makes the peer list persistent.
   //
   // Configure these constants once before deployment:
-  var GITHUB_OWNER = "";       // e.g. "your-org"
-  var GITHUB_REPO = "";        // e.g. "attendance-peers"
+  var GITHUB_OWNER = "chaito10";       // e.g. "your-org"
+  var GITHUB_REPO = "Attendance";        // e.g. "attendance-peers"
   var GITHUB_BRANCH = "main";
-  var GITHUB_PAGES_BASE = "";  // e.g. "https://your-org.github.io/attendance-peers"
+  var GITHUB_PAGES_BASE = "https://chaito10.github.io/Attendance";  // e.g. "https://your-org.github.io/attendance-peers"
   var SYNC_INTERVAL_MS = 15000;
 
   var deviceId = null;
@@ -510,7 +510,16 @@
         },
         body:JSON.stringify(payload)
       });
-      if (!put.ok) throw new Error('GitHub peer registration HTTP ' + put.status);
+      if (!put.ok){
+        var errText = '';
+        try { errText = await put.text(); } catch(e){}
+        var detail = '';
+        try {
+          var ej = JSON.parse(errText);
+          detail = ej.message || '';
+        } catch(e){}
+        throw new Error('GitHub peer registration HTTP ' + put.status + (detail ? ': ' + detail : ''));
+      }
 
       // Maintain peers.json as a convenience for GitHub Pages readers.
       // Peer discovery does NOT depend on this file because the repository
@@ -940,14 +949,14 @@
 
     html += '<div class="card">';
     html += '<h2 class="section">GitHub Pages peer sync</h2>';
-    html += '<div class="muted" style="margin-bottom:8px;">Register this device in the shared GitHub peer directory. The token stays in this browser and is never stored in the page source.</div>';
+    html += '<div class="muted" style="margin-bottom:8px;">This deployment is preconfigured for <code>chaito10/Attendance</code>. The token stays in this browser and is never stored in the page source. It must have GitHub Contents read/write permission.</div>';
     html += '<div class="row">';
     html += '<label class="field">GitHub owner<input type="text" id="ghOwner" value="' + escapeHtml(GITHUB_OWNER) + '" placeholder="your-org"></label>';
     html += '<label class="field">Repository<input type="text" id="ghRepo" value="' + escapeHtml(GITHUB_REPO) + '" placeholder="attendance-peers"></label>';
     html += '<label class="field">Pages URL<input type="text" id="ghPages" value="' + escapeHtml(GITHUB_PAGES_BASE) + '" placeholder="https://your-org.github.io/attendance-peers"></label>';
     html += '</div>';
     html += '<div class="row" style="margin-top:8px;">';
-    html += '<label class="field">GitHub token<input type="password" id="ghToken" placeholder="fine-grained token with Contents: Read/Write"></label>';
+    html += '<label class="field">GitHub token<input type="password" id="ghToken" placeholder="fine-grained token: Contents Read/Write"></label>';
     html += '<button class="btn" id="saveGithub" style="align-self:flex-end;">Register device</button>';
     html += '<button class="btn secondary" id="githubSyncNow" style="align-self:flex-end;">Sync now</button>';
     html += '</div>';
@@ -1038,6 +1047,7 @@
       var owner = document.getElementById('ghOwner').value.trim();
       var repo = document.getElementById('ghRepo').value.trim();
       var pages = document.getElementById('ghPages').value.trim().replace(/\/+$/,'');
+      if (!pages) pages = 'https://' + owner + '.github.io/' + repo;
       var token = document.getElementById('ghToken').value.trim();
       if (!owner || !repo || !pages || !token){
         toast('Owner, repo, Pages URL and token are required');
@@ -1061,8 +1071,16 @@
         toast(result.peers
           ? 'Registered — ' + result.peers + ' peer found'
           : 'Registered — waiting for another peer');
-      }).catch(function(){
-        toast('Registration failed — check GitHub settings');
+      }).catch(function(e){
+        console.error('GitHub registration failed:', e);
+        var msg = String(e && e.message || '');
+        if (msg.indexOf('401') >= 0 || msg.indexOf('403') >= 0){
+          toast('GitHub token rejected — needs Contents write');
+        } else if (msg.indexOf('404') >= 0){
+          toast('GitHub repo/path not found');
+        } else {
+          toast('Registration failed — see browser console');
+        }
       });
     });
 

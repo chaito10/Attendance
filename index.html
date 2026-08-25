@@ -7,6 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- WASM SQLite -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+<!-- Serverless WebRTC (peer discovery via public torrent trackers, no signaling server) -->
+<script src="https://cdn.jsdelivr.net/npm/trystero@0.20.2/dist/trystero-torrent.min.js"></script>
 <style>
   :root{
     --cover: #28402f;
@@ -67,7 +71,11 @@
     font-family: var(--font-display); font-weight: 700; font-size: 26px;
     letter-spacing: 0.04em; margin: 0; text-transform: uppercase;
   }
+  .head-right{ display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
   header.title .today{ font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); }
+  .peer-badge{ font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); display:flex; align-items:center; gap:5px; }
+  .peer-dot{ width:7px; height:7px; border-radius:50%; background:#9a9179; }
+  .peer-dot.live{ background: var(--good); box-shadow: 0 0 0 2px rgba(61,107,74,0.2); }
   nav.tabs{ display: flex; gap: 6px; margin: 16px 0 18px; }
   nav.tabs button{
     font-family: var(--font-display); font-size: 14.5px; letter-spacing: 0.03em; text-transform: uppercase;
@@ -118,7 +126,6 @@
     background: var(--cover); color: var(--paper); border: none; border-radius: 5px; padding: 9px 16px; cursor: pointer;
   }
   .btn.secondary{ background: transparent; color: var(--ink); border: 1px solid var(--ink); }
-  .btn.danger{ background: var(--stamp-dark); }
   .btn.big{ font-size: 16px; padding: 13px 22px; width: 100%; }
   .btn:disabled{ opacity: 0.5; cursor: default; }
   .row{ display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
@@ -157,7 +164,10 @@
     <div class="pages">
       <header class="title">
         <h1>Attendance Register</h1>
-        <div class="today" id="todayLabel">—</div>
+        <div class="head-right">
+          <div class="today" id="todayLabel">—</div>
+          <div class="peer-badge"><span class="peer-dot" id="peerDot"></span><span id="peerText">starting sync…</span></div>
+        </div>
       </header>
       <nav class="tabs">
         <button id="tabCheckin" class="active">Check In</button>
@@ -172,20 +182,22 @@
 (function(){
   "use strict";
 
+  // Change this once per class/semester before you deploy — it's the WebRTC room
+  // every device syncs through. Different code = different, unconnected roster.
+  var ROOM_ID = "nfsu-cyber-attendance-2026";
+
   var todayStr = new Date().toISOString().slice(0,10);
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString(undefined,{ weekday:'short', year:'numeric', month:'short', day:'numeric' });
 
+  var SQL = null;       // sql.js module
+  var db = null;        // live database
+  var peerCount = 0;
+  var broadcastMutation = null;
+  var forceResync = null;
+
   var state = {
     tab: 'checkin',
-    profile: null,          // personal: {id, roll, name, phone}
-    roster: [],              // shared: [{id, roll, name, phone}]
-    settings: { pin: '0000' },
-    sessionDate: todayStr,
-    session: { open: false },
-    attendance: {},          // shared, this date
-    history: [],             // personal: dates I was marked present
-    sessionDates: [],         // shared: every date a session was ever opened
-    teacherAuthed: false,
+    profile: null,
     reportDate: todayStr,
     loading: true
   };
@@ -197,42 +209,162 @@
     clearTimeout(toast._h);
     toast._h = setTimeout(function(){ t.classList.remove('show'); }, 2200);
   }
-
-  // ---------- storage helpers ----------
-  async function getKey(key, shared){
-    try{ var r = await window.storage.get(key, shared); return r ? r.value : null; }
-    catch(e){ return null; }
-  }
-  async function setKey(key, value, shared){
-    try{ var r = await window.storage.set(key, value, shared); return !!r; }
-    catch(e){ console.error('storage set failed', key, e); return false; }
-  }
-  async function deleteKey(key, shared){
-    try{ await window.storage.delete(key, shared); return true; }
-    catch(e){ return false; }
+  function updatePeerBadge(){
+    document.getElementById('peerDot').classList.toggle('live', peerCount > 0);
+    document.getElementById('peerText').textContent = peerCount > 0
+      ? (peerCount + ' device' + (peerCount === 1 ? '' : 's') + ' synced')
+      : 'no devices linked yet';
   }
 
-  async function loadProfile(){ var v = await getKey('profile', false); state.profile = v ? JSON.parse(v) : null; }
-  async function saveProfile(){ return setKey('profile', JSON.stringify(state.profile), false); }
-  async function loadHistory(){ var v = await getKey('history', false); state.history = v ? JSON.parse(v) : []; }
-  async function saveHistory(){ return setKey('history', JSON.stringify(state.history), false); }
+  // ---------- device-local identity (per-phone, plain browser storage — fine now this isn't a Claude artifact) ----------
+  function loadProfile(){ try{ var v = localStorage.getItem('attendance_profile_v1'); return v ? JSON.parse(v) : null; }catch(e){ return null; } }
+  function saveProfile(p){ try{ localStorage.setItem('attendance_profile_v1', JSON.stringify(p)); }catch(e){} }
+  function clearProfile(){ try{ localStorage.removeItem('attendance_profile_v1'); }catch(e){} }
 
-  async function loadRoster(){ var v = await getKey('roster', true); state.roster = v ? JSON.parse(v) : []; }
-  async function saveRoster(){ return setKey('roster', JSON.stringify(state.roster), true); }
-  async function loadSettings(){ var v = await getKey('settings', true); state.settings = v ? JSON.parse(v) : { pin: '0000' }; }
-  async function saveSettings(){ return setKey('settings', JSON.stringify(state.settings), true); }
-  async function loadSession(date){ var v = await getKey('session:' + date, true); state.session = v ? JSON.parse(v) : { open: false }; }
-  async function saveSession(date){ return setKey('session:' + date, JSON.stringify(state.session), true); }
-  async function loadAttendance(date){ var v = await getKey('attendance:' + date, true); state.attendance = v ? JSON.parse(v) : {}; }
-  async function saveAttendance(date){ return setKey('attendance:' + date, JSON.stringify(state.attendance), true); }
-  async function loadSessionDates(){ var v = await getKey('session-dates', true); state.sessionDates = v ? JSON.parse(v) : []; }
-  async function saveSessionDates(){ return setKey('session-dates', JSON.stringify(state.sessionDates), true); }
+  // ---------- local IndexedDB persistence of the sqlite file (per device) ----------
+  var IDB_NAME = 'attendance-sqlite', IDB_STORE = 'kv';
+  function idbOpen(){
+    return new Promise(function(resolve, reject){
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function(){ req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = function(){ resolve(req.result); };
+      req.onerror = function(){ reject(req.error); };
+    });
+  }
+  function idbGet(key){
+    return idbOpen().then(function(idb){
+      return new Promise(function(resolve, reject){
+        var tx = idb.transaction(IDB_STORE, 'readonly');
+        var r = tx.objectStore(IDB_STORE).get(key);
+        r.onsuccess = function(){ resolve(r.result || null); };
+        r.onerror = function(){ reject(r.error); };
+      });
+    }).catch(function(){ return null; });
+  }
+  function idbSet(key, val){
+    return idbOpen().then(function(idb){
+      return new Promise(function(resolve, reject){
+        var tx = idb.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(val, key);
+        tx.oncomplete = function(){ resolve(true); };
+        tx.onerror = function(){ reject(tx.error); };
+      });
+    }).catch(function(){ return false; });
+  }
+  var persistTimer = null;
+  function persistLocal(){
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(function(){ idbSet('sqlite', db.export()); }, 200);
+  }
 
-  // ---------- helpers ----------
+  // ---------- sql.js helpers ----------
+  function queryAll(sql, params){
+    var stmt = db.prepare(sql);
+    if (params) stmt.bind(params);
+    var out = [];
+    while (stmt.step()) out.push(stmt.getAsObject());
+    stmt.free();
+    return out;
+  }
+  function run(sql, params){ db.run(sql, params || []); }
+
+  function runSchema(){
+    run('CREATE TABLE IF NOT EXISTS students (id TEXT PRIMARY KEY, roll TEXT, name TEXT, phone TEXT)');
+    run('CREATE TABLE IF NOT EXISTS sessions (date TEXT PRIMARY KEY, open INTEGER)');
+    run('CREATE TABLE IF NOT EXISTS attendance (date TEXT, student_id TEXT, time TEXT, PRIMARY KEY(date, student_id))');
+    run('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+  }
+
+  // ---------- reads ----------
+  function getRoster(){ return queryAll('SELECT * FROM students ORDER BY roll'); }
+  function getSessionOpen(date){ var r = queryAll('SELECT open FROM sessions WHERE date=?', [date]); return r.length ? !!r[0].open : false; }
+  function getAttendanceMap(date){
+    var rows = queryAll('SELECT student_id, time FROM attendance WHERE date=?', [date]);
+    var map = {}; rows.forEach(function(r){ map[r.student_id] = { time: r.time }; }); return map;
+  }
+  function getSessionDates(){ return queryAll('SELECT date FROM sessions ORDER BY date').map(function(r){ return r.date; }); }
+  function getHistoryDates(id){ return queryAll('SELECT date FROM attendance WHERE student_id=? ORDER BY date', [id]).map(function(r){ return r.date; }); }
+  function getSetting(key, def){ var r = queryAll('SELECT value FROM settings WHERE key=?', [key]); return r.length ? r[0].value : def; }
+
+  // ---------- mutations (applied locally + broadcast to peers) ----------
+  function applyMutationLocally(m){
+    switch (m.type){
+      case 'ADD_STUDENT':
+        run('INSERT OR IGNORE INTO students (id,roll,name,phone) VALUES (?,?,?,?)', [m.id, m.roll, m.name, m.phone || '']);
+        break;
+      case 'REMOVE_STUDENT':
+        run('DELETE FROM students WHERE id=?', [m.id]);
+        break;
+      case 'SET_SESSION':
+        run('INSERT INTO sessions (date,open) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET open=excluded.open', [m.date, m.open ? 1 : 0]);
+        break;
+      case 'MARK_ATTENDANCE':
+        run('INSERT OR IGNORE INTO attendance (date,student_id,time) VALUES (?,?,?)', [m.date, m.student_id, m.time]);
+        break;
+      case 'SET_SETTING':
+        run('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [m.key, m.value]);
+        break;
+    }
+    persistLocal();
+  }
+  function doMutation(m){
+    applyMutationLocally(m);
+    if (broadcastMutation){ try{ broadcastMutation(m); }catch(e){ console.error('broadcast failed', e); } }
+    render();
+  }
+  function mergeExternalDump(bytesLike){
+    try{
+      var bytes = bytesLike instanceof Uint8Array ? bytesLike : new Uint8Array(bytesLike);
+      var tmp = new SQL.Database(bytes);
+      function copy(sql, insertSql){
+        var r = tmp.exec(sql);
+        if (!r.length) return;
+        r[0].values.forEach(function(row){ run(insertSql, row); });
+      }
+      copy('SELECT id,roll,name,phone FROM students', 'INSERT OR IGNORE INTO students (id,roll,name,phone) VALUES (?,?,?,?)');
+      copy('SELECT date,student_id,time FROM attendance', 'INSERT OR IGNORE INTO attendance (date,student_id,time) VALUES (?,?,?)');
+      copy('SELECT date,open FROM sessions', 'INSERT INTO sessions (date,open) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET open=excluded.open');
+      copy('SELECT key,value FROM settings', 'INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+      tmp.close();
+      persistLocal();
+    }catch(e){ console.error('merge failed', e); }
+  }
+
+  // ---------- WebRTC replication (Trystero, no signaling server) ----------
+  function connectRoom(){
+    try{
+      var room = trystero.joinRoom({ appId: 'attendance-app-' + ROOM_ID }, ROOM_ID);
+      var syncPair = room.makeAction('sync');
+      var mutPair = room.makeAction('mut');
+      var sendSync = syncPair[0], getSync = syncPair[1];
+      var sendMut = mutPair[0], getMut = mutPair[1];
+
+      getSync(function(bytes){ mergeExternalDump(bytes); render(); });
+      getMut(function(m){ applyMutationLocally(m); render(); });
+
+      room.onPeerJoin(function(id){
+        peerCount++;
+        try{ sendSync(db.export(), id); }catch(e){ console.error('sync send failed', e); }
+        updatePeerBadge();
+      });
+      room.onPeerLeave(function(){
+        peerCount = Math.max(0, peerCount - 1);
+        updatePeerBadge();
+      });
+
+      broadcastMutation = function(m){ sendMut(m); };
+      forceResync = function(){ try{ sendSync(db.export()); toast('Re-sync requested'); }catch(e){ toast('Could not reach peers'); } };
+    }catch(e){
+      console.error('WebRTC room join failed', e);
+      document.getElementById('peerText').textContent = 'offline (this device only)';
+    }
+  }
+
+  // ---------- shared render helpers ----------
   var viewEl = document.getElementById('view');
   function escapeHtml(s){ return String(s).replace(/[&<>"']/g, function(c){ return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
-  function fmtTime(iso){ try{ return new Date(iso).toLocaleTimeString(undefined,{hour:'2-digit', minute:'2-digit'}); } catch(e){ return ''; } }
-  function fmtDate(d){ try{ return new Date(d + 'T00:00:00').toLocaleDateString(undefined,{ month:'short', day:'numeric' }); } catch(e){ return d; } }
+  function fmtTime(iso){ try{ return new Date(iso).toLocaleTimeString(undefined,{hour:'2-digit', minute:'2-digit'}); }catch(e){ return ''; } }
+  function fmtDate(d){ try{ return new Date(d + 'T00:00:00').toLocaleDateString(undefined,{ month:'short', day:'numeric' }); }catch(e){ return d; } }
 
   // ---------- Check In tab ----------
   function renderRegistrationForm(){
@@ -246,39 +378,39 @@
     html += '</div>';
     viewEl.innerHTML = html;
 
-    document.getElementById('regSubmit').addEventListener('click', async function(){
+    document.getElementById('regSubmit').addEventListener('click', function(){
       var name = document.getElementById('regName').value.trim();
       var roll = document.getElementById('regRoll').value.trim();
       var phone = document.getElementById('regPhone').value.trim();
       if (!name || !roll){ toast('Name and roll number are required'); return; }
 
-      var dup = state.roster.find(function(s){ return s.roll.toLowerCase() === roll.toLowerCase(); });
-      if (dup && !document.getElementById('regSubmit').dataset.confirmed){
+      var dup = getRoster().find(function(s){ return s.roll.toLowerCase() === roll.toLowerCase(); });
+      var btn = document.getElementById('regSubmit');
+      if (dup && !btn.dataset.confirmed){
         toast('That roll no. is already registered — tap again to continue anyway');
-        document.getElementById('regSubmit').dataset.confirmed = '1';
-        document.getElementById('regSubmit').textContent = 'Yes, continue anyway';
+        btn.dataset.confirmed = '1';
+        btn.textContent = 'Yes, continue anyway';
         return;
       }
 
       var id = 's_' + roll.replace(/\s+/g,'_').toLowerCase() + '_' + Date.now().toString(36);
       var entry = { id: id, roll: roll, name: name, phone: phone };
-      state.roster.push(entry);
-      var okRoster = await saveRoster();
+      doMutation({ type: 'ADD_STUDENT', id: id, roll: roll, name: name, phone: phone });
       state.profile = entry;
-      var okProfile = await saveProfile();
-      state.history = [];
-      await saveHistory();
-      if (!okRoster || !okProfile){ toast('Something went wrong saving — please retry'); return; }
+      saveProfile(entry);
       toast('Welcome, ' + name + '!');
-      renderCheckin();
+      render();
     });
   }
 
   function renderCheckin(){
     var p = state.profile;
-    var alreadyMarked = !!state.attendance[p.id];
-    var totalSessions = state.sessionDates.length;
-    var pct = totalSessions ? Math.round((state.history.length / totalSessions) * 100) : null;
+    var attendanceToday = getAttendanceMap(todayStr);
+    var alreadyMarked = !!attendanceToday[p.id];
+    var sessionOpen = getSessionOpen(todayStr);
+    var sessionDates = getSessionDates();
+    var history = getHistoryDates(p.id);
+    var pct = sessionDates.length ? Math.round((history.length / sessionDates.length) * 100) : null;
 
     var html = '';
     html += '<div class="card id-card">';
@@ -288,16 +420,16 @@
     html += '</div>';
 
     html += '<div class="card status-row">';
-    html += '<div><span class="status-dot ' + (state.session.open ? 'open' : 'closed') + '"></span>' +
-      '<strong>' + (state.session.open ? 'Session open' : 'Session closed') + '</strong>' +
-      '<div class="muted">' + escapeHtml(state.sessionDate) + '</div></div>';
+    html += '<div><span class="status-dot ' + (sessionOpen ? 'open' : 'closed') + '"></span>' +
+      '<strong>' + (sessionOpen ? 'Session open' : 'Session closed') + '</strong>' +
+      '<div class="muted">' + escapeHtml(todayStr) + '</div></div>';
     html += '</div>';
 
     html += '<div class="card" style="text-align:center;">';
     if (alreadyMarked){
       html += '<div class="stamp big">Present</div>';
-      html += '<div class="muted" style="margin-top:8px;">Marked at ' + fmtTime(state.attendance[p.id].time) + '</div>';
-    } else if (state.session.open){
+      html += '<div class="muted" style="margin-top:8px;">Marked at ' + fmtTime(attendanceToday[p.id].time) + '</div>';
+    } else if (sessionOpen){
       html += '<button class="btn big" id="markBtn">Mark my attendance</button>';
     } else {
       html += '<div class="muted">Attendance isn\'t open right now. Check back when your teacher starts roll call.</div>';
@@ -307,15 +439,15 @@
     html += '<div class="card">';
     html += '<div class="row" style="justify-content:space-between;">';
     html += '<h2 class="section" style="border:none;margin:0;">My attendance</h2>';
-    if (pct !== null){ html += '<span class="percent-badge ' + (pct >= 75 ? 'ok' : 'low') + '">' + state.history.length + ' / ' + totalSessions + ' &middot; ' + pct + '%</span>'; }
+    if (pct !== null){ html += '<span class="percent-badge ' + (pct >= 75 ? 'ok' : 'low') + '">' + history.length + ' / ' + sessionDates.length + ' &middot; ' + pct + '%</span>'; }
     html += '</div>';
-    if (state.sessionDates.length === 0){
+    if (sessionDates.length === 0){
       html += '<div class="empty">No sessions recorded yet.</div>';
     } else {
-      var dates = state.sessionDates.slice().sort().reverse();
+      var dates = sessionDates.slice().sort().reverse();
       html += '<table class="report"><thead><tr><th>Date</th><th>Status</th></tr></thead><tbody>';
       html += dates.map(function(d){
-        var present = state.history.indexOf(d) > -1;
+        var present = history.indexOf(d) > -1;
         return '<tr><td>' + fmtDate(d) + '</td><td>' + (present ? '<span style="color:var(--good);font-weight:600;">Present</span>' : '<span class="muted">Absent</span>') + '</td></tr>';
       }).join('');
       html += '</tbody></table>';
@@ -326,35 +458,29 @@
 
     viewEl.innerHTML = html;
 
-    if (!alreadyMarked && state.session.open){
-      document.getElementById('markBtn').addEventListener('click', async function(){
+    if (!alreadyMarked && sessionOpen){
+      document.getElementById('markBtn').addEventListener('click', function(){
         var btn = document.getElementById('markBtn');
         btn.disabled = true;
-        state.attendance[p.id] = { time: new Date().toISOString(), name: p.name, roll: p.roll };
-        var ok1 = await saveAttendance(state.sessionDate);
-        if (state.history.indexOf(state.sessionDate) === -1) state.history.push(state.sessionDate);
-        var ok2 = await saveHistory();
-        if (!ok1 || !ok2){ toast('Could not save — try again'); delete state.attendance[p.id]; renderCheckin(); return; }
+        doMutation({ type: 'MARK_ATTENDANCE', date: todayStr, student_id: p.id, time: new Date().toISOString() });
         toast('You\'re marked present');
-        renderCheckin();
       });
     }
-    document.getElementById('notMe').addEventListener('click', async function(){
+    document.getElementById('notMe').addEventListener('click', function(){
       if (!confirm('Clear this device\'s registration? You\'ll need to sign the register again.')) return;
-      await deleteKey('profile', false);
-      await deleteKey('history', false);
+      clearProfile();
       state.profile = null;
-      state.history = [];
-      renderCheckin();
+      render();
     });
   }
 
   function renderCheckinTab(){
-    if (!state.profile){ renderRegistrationForm(); }
-    else { renderCheckin(); }
+    if (!state.profile) renderRegistrationForm();
+    else renderCheckin();
   }
 
   // ---------- Register (teacher) tab ----------
+  var teacherAuthed = false;
   function renderPinGate(){
     viewEl.innerHTML =
       '<div class="card pin-gate">' +
@@ -367,41 +493,45 @@
     input.addEventListener('keydown', function(e){ if (e.key === 'Enter') submit(); });
     document.getElementById('pinSubmit').addEventListener('click', submit);
     function submit(){
-      if (input.value === state.settings.pin){ state.teacherAuthed = true; renderRegister(); }
+      if (input.value === getSetting('pin', '0000')){ teacherAuthed = true; render(); }
       else toast('Incorrect PIN');
     }
   }
 
-  async function renderRegister(){
-    if (!state.teacherAuthed){ renderPinGate(); return; }
-    var presentToday = Object.keys(state.attendance).length;
+  function renderRegister(){
+    if (!teacherAuthed){ renderPinGate(); return; }
+    var roster = getRoster();
+    var attendance = getAttendanceMap(state.reportDate);
+    var sessionOpen = getSessionOpen(state.reportDate);
+    var presentCount = Object.keys(attendance).length;
 
     var html = '';
     html += '<div class="card">';
     html += '<h2 class="section">Session control</h2>';
     html += '<div class="row" style="margin-bottom:10px;">';
     html += '<label class="field">Date<input type="date" id="reportDate" value="' + state.reportDate + '"></label>';
-    html += '<label class="field">Status<div class="row"><span class="status-dot ' + (state.session.open ? 'open' : 'closed') + '"></span>' + (state.session.open ? 'Open' : 'Closed') + '</div></label>';
+    html += '<label class="field">Status<div class="row"><span class="status-dot ' + (sessionOpen ? 'open' : 'closed') + '"></span>' + (sessionOpen ? 'Open' : 'Closed') + '</div></label>';
     html += '</div>';
-    html += '<div class="row"><button class="btn" id="toggleSession">' + (state.session.open ? 'Close session' : 'Open session') + '</button>';
-    html += '<span class="count-badge">' + presentToday + ' / ' + state.roster.length + ' present</span></div>';
+    html += '<div class="row"><button class="btn" id="toggleSession">' + (sessionOpen ? 'Close session' : 'Open session') + '</button>';
+    html += '<span class="count-badge">' + presentCount + ' / ' + roster.length + ' present</span>';
+    html += '<button class="btn secondary" id="resyncBtn">Force resync</button></div>';
     html += '</div>';
 
     html += '<div class="card qr-box">';
     html += '<h2 class="section" style="text-align:left;">Show this to your class</h2>';
     html += '<img id="qrImg" width="200" height="200" alt="QR code linking to this register" src="">';
     html += '<div class="link-copy"><code id="linkText"></code><button class="btn secondary" id="copyLink">Copy link</button></div>';
-    html += '<div class="muted" style="margin-top:6px;">Students scan once to register, then again each class to check in — open the session first.</div>';
+    html += '<div class="muted" style="margin-top:6px;">Students scan once to register, then again each class to check in — open the session first. Devices sync directly with each other over Wi-Fi/internet; keep a few phones (including yours) on the page for a minute so new scans propagate.</div>';
     html += '</div>';
 
     html += '<div class="card">';
     html += '<h2 class="section">Attendance — ' + escapeHtml(state.reportDate) + '</h2>';
-    if (state.roster.length === 0){
+    if (roster.length === 0){
       html += '<div class="empty">No one has registered yet. Share the QR code, or add students manually below.</div>';
     } else {
       html += '<table class="report"><thead><tr><th>Roll</th><th>Name</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>';
-      html += state.roster.map(function(s){
-        var m = state.attendance[s.id];
+      html += roster.map(function(s){
+        var m = attendance[s.id];
         var action = m ? '' : '<button class="rem-btn" data-mark="' + escapeHtml(s.id) + '">mark present</button>';
         return '<tr><td>' + escapeHtml(s.roll) + '</td><td>' + escapeHtml(s.name) + '</td>' +
           '<td>' + (m ? '<span style="color:var(--good);font-weight:600;">Present</span>' : '<span class="muted">Absent</span>') + '</td>' +
@@ -418,7 +548,7 @@
     html += '<textarea id="bulkAdd" rows="3" placeholder="21CY001, Aditi Rao, 9876543210\n21CY002, Basavaraj Patil"></textarea>';
     html += '<div class="row" style="margin-top:8px;"><button class="btn" id="bulkAddBtn">Add to roll</button></div>';
     html += '<div class="roster-list" style="margin-top:12px;">';
-    html += state.roster.map(function(s){
+    html += roster.map(function(s){
       return '<div class="roll-row"><div class="roll-no">' + escapeHtml(s.roll) + '</div><div class="stud-name">' + escapeHtml(s.name) + (s.phone ? '<span class="sub">' + escapeHtml(s.phone) + '</span>' : '') + '</div>' +
         '<button class="rem-btn" data-id="' + escapeHtml(s.id) + '">remove</button></div>';
     }).join('') || '<div class="empty">No students yet.</div>';
@@ -426,9 +556,11 @@
 
     html += '<div class="card">';
     html += '<h2 class="section">Register PIN</h2>';
-    html += '<div class="row"><label class="field">New PIN<input type="text" id="newPin" placeholder="' + escapeHtml(state.settings.pin) + '"></label>';
+    html += '<div class="row"><label class="field">New PIN<input type="text" id="newPin" placeholder="' + escapeHtml(getSetting('pin','0000')) + '"></label>';
     html += '<button class="btn secondary" id="savePin" style="align-self:flex-end;">Save PIN</button></div>';
     html += '</div>';
+
+    html += '<div class="card"><h2 class="section">Sync room</h2><div class="muted">Room code baked into this file: <code>' + escapeHtml(ROOM_ID) + '</code> — every device running this exact file syncs together. Change it in the source before a new semester to start a fresh roster.</div></div>';
 
     viewEl.innerHTML = html;
 
@@ -439,28 +571,23 @@
       navigator.clipboard.writeText(link).then(function(){ toast('Link copied'); }).catch(function(){ toast('Could not copy — copy it manually'); });
     });
 
-    document.getElementById('reportDate').addEventListener('change', async function(e){
+    document.getElementById('reportDate').addEventListener('change', function(e){
       state.reportDate = e.target.value;
-      await loadSession(state.reportDate);
-      await loadAttendance(state.reportDate);
-      renderRegister();
+      render();
     });
 
-    document.getElementById('toggleSession').addEventListener('click', async function(){
-      state.session.open = !state.session.open;
-      var ok = await saveSession(state.reportDate);
-      if (ok && state.session.open && state.sessionDates.indexOf(state.reportDate) === -1){
-        state.sessionDates.push(state.reportDate);
-        await saveSessionDates();
-      }
-      if (!ok){ state.session.open = !state.session.open; toast('Could not update session'); }
-      renderRegister();
+    document.getElementById('toggleSession').addEventListener('click', function(){
+      doMutation({ type: 'SET_SESSION', date: state.reportDate, open: !sessionOpen });
+    });
+
+    document.getElementById('resyncBtn').addEventListener('click', function(){
+      if (forceResync) forceResync(); else toast('Not connected to any peers');
     });
 
     document.getElementById('exportCsv').addEventListener('click', function(){
       var rows = [['Roll','Name','Phone','Status','Time']];
-      state.roster.forEach(function(s){
-        var m = state.attendance[s.id];
+      roster.forEach(function(s){
+        var m = attendance[s.id];
         rows.push([s.roll, s.name, s.phone || '', m ? 'Present' : 'Absent', m ? fmtTime(m.time) : '']);
       });
       var csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('\n');
@@ -472,9 +599,10 @@
       URL.revokeObjectURL(url);
     });
 
-    document.getElementById('bulkAddBtn').addEventListener('click', async function(){
+    document.getElementById('bulkAddBtn').addEventListener('click', function(){
       var lines = document.getElementById('bulkAdd').value.split('\n').map(function(l){ return l.trim(); }).filter(Boolean);
       var added = 0;
+      var existing = getRoster();
       lines.forEach(function(line){
         var parts = line.split(',');
         if (parts.length < 2) return;
@@ -482,41 +610,34 @@
         var name = parts[1].trim();
         var phone = (parts[2] || '').trim();
         if (!roll || !name) return;
-        if (state.roster.some(function(s){ return s.roll === roll; })) return;
-        state.roster.push({ id: 's_' + roll.replace(/\s+/g,'_').toLowerCase() + '_' + Date.now().toString(36), roll: roll, name: name, phone: phone });
+        if (existing.some(function(s){ return s.roll === roll; })) return;
+        var id = 's_' + roll.replace(/\s+/g,'_').toLowerCase() + '_' + Date.now().toString(36) + added;
+        doMutation({ type: 'ADD_STUDENT', id: id, roll: roll, name: name, phone: phone });
         added++;
       });
-      if (added > 0){ var ok = await saveRoster(); toast(ok ? (added + ' student(s) added') : 'Could not save roster'); }
-      else toast('Nothing to add — check the format');
-      renderRegister();
+      toast(added > 0 ? (added + ' student(s) added') : 'Nothing to add — check the format');
+      render();
     });
 
     viewEl.querySelectorAll('[data-id]').forEach(function(btn){
-      btn.addEventListener('click', async function(){
-        var id = btn.getAttribute('data-id');
-        state.roster = state.roster.filter(function(s){ return s.id !== id; });
-        await saveRoster();
-        renderRegister();
+      btn.addEventListener('click', function(){
+        doMutation({ type: 'REMOVE_STUDENT', id: btn.getAttribute('data-id') });
       });
     });
     viewEl.querySelectorAll('[data-mark]').forEach(function(btn){
-      btn.addEventListener('click', async function(){
+      btn.addEventListener('click', function(){
         var id = btn.getAttribute('data-mark');
-        var stud = state.roster.find(function(s){ return s.id === id; });
+        var stud = roster.find(function(s){ return s.id === id; });
         if (!stud) return;
-        state.attendance[id] = { time: new Date().toISOString(), name: stud.name, roll: stud.roll };
-        await saveAttendance(state.reportDate);
-        renderRegister();
+        doMutation({ type: 'MARK_ATTENDANCE', date: state.reportDate, student_id: id, time: new Date().toISOString() });
       });
     });
 
-    document.getElementById('savePin').addEventListener('click', async function(){
+    document.getElementById('savePin').addEventListener('click', function(){
       var val = document.getElementById('newPin').value.trim();
       if (!val){ toast('Enter a PIN first'); return; }
-      state.settings.pin = val;
-      var ok = await saveSettings();
-      toast(ok ? 'PIN updated' : 'Could not save PIN');
-      renderRegister();
+      doMutation({ type: 'SET_SETTING', key: 'pin', value: val });
+      toast('PIN updated');
     });
   }
 
@@ -531,21 +652,26 @@
   document.getElementById('tabCheckin').addEventListener('click', function(){ state.tab = 'checkin'; render(); });
   document.getElementById('tabRegister').addEventListener('click', function(){ state.tab = 'register'; render(); });
 
-  setInterval(async function(){
-    if (state.loading) return;
-    await loadSession(state.sessionDate);
-    await loadAttendance(state.sessionDate);
-    if (state.tab === 'checkin' && state.profile) renderCheckin();
-  }, 4000);
-
-  (async function init(){
+  (function boot(){
+    updatePeerBadge();
     render();
-    await Promise.all([
-      loadProfile(), loadHistory(), loadRoster(), loadSettings(),
-      loadSession(state.sessionDate), loadAttendance(state.sessionDate), loadSessionDates()
-    ]);
-    state.loading = false;
-    render();
+    initSqlJs({ locateFile: function(f){ return 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/' + f; } })
+      .then(function(SQLModule){
+        SQL = SQLModule;
+        return idbGet('sqlite');
+      })
+      .then(function(savedBytes){
+        db = savedBytes ? new SQL.Database(new Uint8Array(savedBytes)) : new SQL.Database();
+        runSchema();
+        state.profile = loadProfile();
+        connectRoom();
+        state.loading = false;
+        render();
+      })
+      .catch(function(e){
+        console.error('startup failed', e);
+        viewEl.innerHTML = '<div class="empty">Could not start the local database. Try reloading the page.</div>';
+      });
   })();
 })();
 </script>

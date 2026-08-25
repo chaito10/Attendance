@@ -7,8 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<!-- WASM SQLite -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+<!-- Local IndexedDB + WebRTC QR; no database WASM required -->
+<!-- Serverless WebRTC (peer discovery via public torrent trackers, no signaling server) -->
 <style>
   :root{
     --cover: #28402f;
@@ -153,9 +153,24 @@
   .percent-badge.ok{ background: rgba(61,107,74,0.15); color: var(--good); }
   .percent-badge.low{ background: rgba(163,57,44,0.14); color: var(--stamp-dark); }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<script>
+(function(){
+  function add(src){var s=document.createElement('script');s.src=src;s.async=true;document.head.appendChild(s);}
+  add('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js');
+})();
+</script>
 </head>
 <body>
+<div id="qrModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--paper);border-radius:10px;padding:18px;max-width:420px;width:100%;text-align:center;color:var(--ink);">
+    <h2 id="qrTitle" class="section">QR</h2><p id="qrHelp" class="muted"></p>
+    <div id="qrCode" style="display:flex;justify-content:center;margin:12px 0;min-height:40px;"></div><textarea id="qrSignalText" readonly style="width:100%;height:100px;font-family:var(--font-mono);font-size:10px;margin:8px 0;"></textarea><div class="row" style="justify-content:center;"><button class="btn secondary" id="copySignalBtn">Copy signal</button><button class="btn secondary" id="pasteSignalBtn">Paste signal</button></div>
+    <button class="btn secondary" onclick="document.getElementById('qrModal').style.display='none'">Close</button>
+  </div>
+</div>
+<input id="qrFile" type="file" accept="image/*" capture="environment" style="display:none">
+
   <div class="book">
     <div class="spine">
       <div class="rivet"></div><div class="rivet"></div><div class="rivet"></div><div class="rivet"></div>
@@ -165,7 +180,7 @@
         <h1>Attendance Register</h1>
         <div class="head-right">
           <div class="today" id="todayLabel">—</div>
-          <div class="peer-badge"><span class="peer-dot" id="peerDot"></span><span id="peerText">starting sync…</span></div>
+          <div class="peer-badge"><span class="peer-dot" id="peerDot"></span><span id="peerText">QR peer mode — no server</span></div>
         </div>
       </header>
       <nav class="tabs">
@@ -188,10 +203,9 @@
   var todayStr = new Date().toISOString().slice(0,10);
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString(undefined,{ weekday:'short', year:'numeric', month:'short', day:'numeric' });
 
-  var SQL = null;       // sql.js module
-  var db = null;        // live database
+    var db = null;        // local JSON store
   var peerCount = 0;
-  var broadcastMutation = null;
+  
   var forceResync = null;
 
   var state = {
@@ -220,562 +234,112 @@
   function saveProfile(p){ try{ localStorage.setItem('attendance_profile_v1', JSON.stringify(p)); }catch(e){} }
   function clearProfile(){ try{ localStorage.removeItem('attendance_profile_v1'); }catch(e){} }
 
-  // ---------- local IndexedDB persistence of the sqlite file (per device) ----------
-  var IDB_NAME = 'attendance-sqlite', IDB_STORE = 'kv';
+  // ---------- local IndexedDB JSON persistence ----------
+  var IDB_NAME = 'attendance-register', IDB_STORE = 'kv';
+  var db = null;
+
+  function emptyDb(){ return {students:[], sessions:[], attendance:[], settings:[]}; }
   function idbOpen(){
-    return new Promise(function(resolve, reject){
-      var req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = function(){ req.result.createObjectStore(IDB_STORE); };
-      req.onsuccess = function(){ resolve(req.result); };
-      req.onerror = function(){ reject(req.error); };
+    return new Promise(function(resolve,reject){
+      var req=indexedDB.open(IDB_NAME,1);
+      req.onupgradeneeded=function(){ if(!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess=function(){resolve(req.result);}; req.onerror=function(){reject(req.error);};
     });
   }
-  function idbGet(key){
-    return idbOpen().then(function(idb){
-      return new Promise(function(resolve, reject){
-        var tx = idb.transaction(IDB_STORE, 'readonly');
-        var r = tx.objectStore(IDB_STORE).get(key);
-        r.onsuccess = function(){ resolve(r.result || null); };
-        r.onerror = function(){ reject(r.error); };
-      });
-    }).catch(function(){ return null; });
-  }
-  function idbSet(key, val){
-    return idbOpen().then(function(idb){
-      return new Promise(function(resolve, reject){
-        var tx = idb.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).put(val, key);
-        tx.oncomplete = function(){ resolve(true); };
-        tx.onerror = function(){ reject(tx.error); };
-      });
-    }).catch(function(){ return false; });
-  }
-  var persistTimer = null;
-  function persistLocal(){
-    clearTimeout(persistTimer);
-    persistTimer = setTimeout(function(){ idbSet('sqlite', db.export()); }, 200);
-  }
-
-  // ---------- sql.js helpers ----------
-  function queryAll(sql, params){
-    var stmt = db.prepare(sql);
-    if (params) stmt.bind(params);
-    var out = [];
-    while (stmt.step()) out.push(stmt.getAsObject());
-    stmt.free();
-    return out;
-  }
-  function run(sql, params){ db.run(sql, params || []); }
-
-  function runSchema(){
-    run('CREATE TABLE IF NOT EXISTS students (id TEXT PRIMARY KEY, roll TEXT, name TEXT, phone TEXT)');
-    run('CREATE TABLE IF NOT EXISTS sessions (date TEXT PRIMARY KEY, open INTEGER)');
-    run('CREATE TABLE IF NOT EXISTS attendance (date TEXT, student_id TEXT, time TEXT, PRIMARY KEY(date, student_id))');
-    run('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
-  }
+  function idbGet(key){ return idbOpen().then(function(idb){ return new Promise(function(resolve,reject){
+    var tx=idb.transaction(IDB_STORE,'readonly'), r=tx.objectStore(IDB_STORE).get(key);
+    r.onsuccess=function(){resolve(r.result || null);}; r.onerror=function(){reject(r.error);};
+  });}).catch(function(){return null;}); }
+  function idbSet(key,val){ return idbOpen().then(function(idb){ return new Promise(function(resolve,reject){
+    var tx=idb.transaction(IDB_STORE,'readwrite'); tx.objectStore(IDB_STORE).put(val,key);
+    tx.oncomplete=function(){resolve(true);}; tx.onerror=function(){reject(tx.error);};
+  });}).catch(function(){return false;}); }
+  var persistTimer=null;
+  function persistLocal(){ clearTimeout(persistTimer); persistTimer=setTimeout(function(){ if(db) idbSet('state',JSON.stringify(db)); },120); }
+  function loadDb(){ return idbGet('state').then(function(v){ try{ return v ? Object.assign(emptyDb(),JSON.parse(v)) : emptyDb(); }catch(e){ return emptyDb(); } }); }
+  function exportDb(){ return new TextEncoder().encode(JSON.stringify(db || emptyDb())); }
+  function importDb(bytes){ var t=new TextDecoder().decode(bytes instanceof Uint8Array?bytes:new Uint8Array(bytes)); return Object.assign(emptyDb(),JSON.parse(t)); }
+  function runSchema(){ }
 
   // ---------- reads ----------
-  function getRoster(){ return queryAll('SELECT * FROM students ORDER BY roll'); }
-  function getSessionOpen(date){ var r = queryAll('SELECT open FROM sessions WHERE date=?', [date]); return r.length ? !!r[0].open : false; }
-  function getAttendanceMap(date){
-    var rows = queryAll('SELECT student_id, time FROM attendance WHERE date=?', [date]);
-    var map = {}; rows.forEach(function(r){ map[r.student_id] = { time: r.time }; }); return map;
-  }
-  function getSessionDates(){ return queryAll('SELECT date FROM sessions ORDER BY date').map(function(r){ return r.date; }); }
-  function getHistoryDates(id){ return queryAll('SELECT date FROM attendance WHERE student_id=? ORDER BY date', [id]).map(function(r){ return r.date; }); }
-  function getSetting(key, def){ var r = queryAll('SELECT value FROM settings WHERE key=?', [key]); return r.length ? r[0].value : def; }
+  function getRoster(){ return (db.students||[]).slice().sort(function(a,b){return String(a.roll).localeCompare(String(b.roll));}); }
+  function getSessionOpen(date){ var r=db.sessions.find(function(x){return x.date===date;}); return !!(r&&r.open); }
+  function getAttendanceMap(date){ var m={}; db.attendance.filter(function(x){return x.date===date;}).forEach(function(x){m[x.student_id]={time:x.time};}); return m; }
+  function getSessionDates(){ return db.sessions.map(function(x){return x.date;}).sort(); }
+  function getHistoryDates(id){ return db.attendance.filter(function(x){return x.student_id===id;}).map(function(x){return x.date;}).sort(); }
+  function getSetting(key,def){ var r=db.settings.find(function(x){return x.key===key;}); return r ? r.value : def; }
 
-  // ---------- mutations (applied locally + broadcast to peers) ----------
+  // ---------- mutations ----------
   function applyMutationLocally(m){
-    switch (m.type){
-      case 'ADD_STUDENT':
-        run('INSERT OR IGNORE INTO students (id,roll,name,phone) VALUES (?,?,?,?)', [m.id, m.roll, m.name, m.phone || '']);
-        break;
-      case 'REMOVE_STUDENT':
-        run('DELETE FROM students WHERE id=?', [m.id]);
-        break;
-      case 'SET_SESSION':
-        run('INSERT INTO sessions (date,open) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET open=excluded.open', [m.date, m.open ? 1 : 0]);
-        break;
-      case 'MARK_ATTENDANCE':
-        run('INSERT OR IGNORE INTO attendance (date,student_id,time) VALUES (?,?,?)', [m.date, m.student_id, m.time]);
-        break;
-      case 'SET_SETTING':
-        run('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [m.key, m.value]);
-        break;
-    }
+    if(m.type==='ADD_STUDENT' && !db.students.some(function(x){return x.id===m.id})) db.students.push({id:m.id,roll:m.roll,name:m.name,phone:m.phone||''});
+    else if(m.type==='REMOVE_STUDENT') db.students=db.students.filter(function(x){return x.id!==m.id;});
+    else if(m.type==='SET_SESSION'){ var ss=db.sessions.find(function(x){return x.date===m.date;}); if(ss) ss.open=!!m.open; else db.sessions.push({date:m.date,open:!!m.open}); }
+    else if(m.type==='MARK_ATTENDANCE' && !db.attendance.some(function(x){return x.date===m.date&&x.student_id===m.student_id})) db.attendance.push({date:m.date,student_id:m.student_id,time:m.time});
+    else if(m.type==='SET_SETTING'){ var st=db.settings.find(function(x){return x.key===m.key;}); if(st) st.value=m.value; else db.settings.push({key:m.key,value:m.value}); }
     persistLocal();
   }
-  function doMutation(m){
-    applyMutationLocally(m);
-    if (broadcastMutation){ try{ broadcastMutation(m); }catch(e){ console.error('broadcast failed', e); } }
-    render();
-  }
-  function mergeExternalDump(bytesLike){
-    try{
-      var bytes = bytesLike instanceof Uint8Array ? bytesLike : new Uint8Array(bytesLike);
-      var tmp = new SQL.Database(bytes);
-      function copy(sql, insertSql){
-        var r = tmp.exec(sql);
-        if (!r.length) return;
-        r[0].values.forEach(function(row){ run(insertSql, row); });
-      }
-      copy('SELECT id,roll,name,phone FROM students', 'INSERT OR IGNORE INTO students (id,roll,name,phone) VALUES (?,?,?,?)');
-      copy('SELECT date,student_id,time FROM attendance', 'INSERT OR IGNORE INTO attendance (date,student_id,time) VALUES (?,?,?)');
-      copy('SELECT date,open FROM sessions', 'INSERT INTO sessions (date,open) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET open=excluded.open');
-      copy('SELECT key,value FROM settings', 'INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-      tmp.close();
-      persistLocal();
-    }catch(e){ console.error('merge failed', e); }
-  }
+  function doMutation(m){ applyMutationLocally(m); if(sendMutationToPeers) try{sendMutationToPeers(m);}catch(e){console.warn(e);} render(); }
+  function mergeExternalDump(bytes){ try{
+    var incoming=importDb(bytes);
+    (incoming.students||[]).forEach(function(x){if(!db.students.some(function(y){return y.id===x.id}))db.students.push(x);});
+    (incoming.sessions||[]).forEach(function(x){var y=db.sessions.find(function(z){return z.date===x.date;});if(y)y.open=!!x.open;else db.sessions.push(x);});
+    (incoming.attendance||[]).forEach(function(x){if(!db.attendance.some(function(y){return y.date===x.date&&y.student_id===x.student_id}))db.attendance.push(x);});
+    (incoming.settings||[]).forEach(function(x){var y=db.settings.find(function(z){return z.key===x.key;});if(y)y.value=x.value;else db.settings.push(x);});
+    persistLocal();
+  }catch(e){console.error('merge failed',e);} }
 
-  // ---------- Static GitHub Pages peer directory + sync ----------
-  // GitHub Pages itself is read-only. A small GitHub repository is used as
-  // the rendezvous point: each registered device publishes a peer record
-  // through the GitHub Contents API, while every device polls the published
-  // peers.json file from GitHub Pages. This removes the dependency on WebRTC
-  // trackers/signalling and makes the peer list persistent.
-  //
-  // Configure these constants once before deployment:
-  var GITHUB_OWNER = "chaito10";       // e.g. "your-org"
-  var GITHUB_REPO = "Attendance";        // e.g. "attendance-peers"
-  var GITHUB_BRANCH = "main";
-  var GITHUB_PAGES_BASE = "https://chaito10.github.io/Attendance";  // e.g. "https://your-org.github.io/attendance-peers"
-  var SYNC_INTERVAL_MS = 15000;
-
-  var deviceId = null;
-  var syncTimer = null;
-  var githubConfigured = false;
-
-  function getDeviceId(){
-    try{
-      var k = 'attendance_device_id_v1';
-      var v = localStorage.getItem(k);
-      if (!v){
-        v = 'peer_' + crypto.randomUUID();
-        localStorage.setItem(k, v);
-      }
-      return v;
-    }catch(e){
-      return 'peer_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    }
-  }
-
-  function getPeerConfig(){
-    return {
-      owner: GITHUB_OWNER.trim(),
-      repo: GITHUB_REPO.trim(),
-      branch: GITHUB_BRANCH.trim() || 'main',
-      pages: GITHUB_PAGES_BASE.trim().replace(/\/+$/,'')
+  // ---------- 100% client-side QR/WebRTC signaling ----------
+  var qrPeers={}, qrConnection=null, qrRole=null;
+  function deviceId(){ try{var k='attendance_device_id';var v=localStorage.getItem(k);if(!v){v='peer_'+crypto.randomUUID();localStorage.setItem(k,v);}return v;}catch(e){return 'peer_'+Math.random().toString(36).slice(2);} }
+  function b64u(bytes){var bin='';for(var i=0;i<bytes.length;i+=8192)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));return btoa(bin);}
+  function u8(s){var bin=atob(s),a=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return a;}
+  function enc(o){return btoa(unescape(encodeURIComponent(JSON.stringify(o))));}
+  function dec(s){return JSON.parse(decodeURIComponent(escape(atob(s))));}
+  function qrStatus(t){var e=document.getElementById('qrSyncStatus');if(e)e.textContent=t;document.getElementById('peerText').textContent=t;}
+  function rtc(){return new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]});}
+  function iceDone(pc){return new Promise(function(resolve){if(pc.iceGatheringState==='complete')return resolve();var done=false;function f(){if(done)return;done=true;pc.removeEventListener('icegatheringstatechange',f);resolve();}pc.addEventListener('icegatheringstatechange',function(){if(pc.iceGatheringState==='complete')f();});setTimeout(f,8000);});}
+  function sendSnapshot(ch){try{ch.send(JSON.stringify({type:'snapshot',room:ROOM_ID,dump:b64u(exportDb())}));}catch(e){}}
+  function wireChannel(ch,id){
+    id = id || ('peer_'+Math.random().toString(36).slice(2));
+    qrPeers[id]={channel:ch};
+    ch.onopen=function(){
+      try{ch.send(JSON.stringify({type:'hello',room:ROOM_ID,peerId:deviceId()}));}catch(e){}
+      peerCount=Object.keys(qrPeers).length;updatePeerBadge();qrStatus(peerCount+' peer'+(peerCount===1?'':'s')+' connected');sendSnapshot(ch);
     };
+    ch.onclose=function(){delete qrPeers[id];peerCount=Object.keys(qrPeers).length;updatePeerBadge();};
+    ch.onmessage=function(ev){try{var m=JSON.parse(ev.data);if(m.room!==ROOM_ID)return;if(m.type==='hello'){ qrPeers[id].peerId=m.peerId; return; } if(m.type==='snapshot')mergeExternalDump(u8(m.dump));else if(m.type==='mutation')applyMutationLocally(m.mutation);render();}catch(e){console.warn(e);}};
   }
-
-  function refreshPeerStatus(count, text){
-    peerCount = Math.max(0, count || 0);
-    updatePeerBadge();
-    if (text) document.getElementById('peerText').textContent = text;
+  function payload(type,pc){return {app:'attendance-qr-p2p',v:1,type:type,room:ROOM_ID,from:deviceId(),description:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}};}
+  function openQrModal(title,text,data){
+    document.getElementById('qrTitle').textContent=title;document.getElementById('qrHelp').textContent=text;document.getElementById('qrSignalText').value=data;
+    var box=document.getElementById('qrCode');box.innerHTML='';
+    if(window.QRCode){new QRCode(box,{text:data,width:280,height:280,correctLevel:QRCode.CorrectLevel.L});}
+    else {var ta=document.createElement('textarea');ta.readOnly=true;ta.value=data;ta.style.width='100%';ta.style.height='170px';box.appendChild(ta);}
+    document.getElementById('qrModal').style.display='flex';
+    var cb=document.getElementById('copySignalBtn'); if(cb) cb.onclick=function(){navigator.clipboard.writeText(data).then(function(){toast('Signal copied');}).catch(function(){toast('Select and copy the signal');});};
+    var pb=document.getElementById('pasteSignalBtn'); if(pb) pb.onclick=async function(){var x=prompt('Paste the QR signal text');if(x){var o;try{o=dec(x);}catch(e){toast('Invalid signal');return;}if(o.type==='offer')await acceptOffer(x);else if(o.type==='answer')await acceptAnswer(x);}};
   }
-
-  async function fetchJson(url, opts){
-    var res = await fetch(url, Object.assign({
-      cache: 'no-store',
-      headers: { 'Accept': 'application/vnd.github+json' }
-    }, opts || {}));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
+  function closeQrModal(){document.getElementById('qrModal').style.display='none';}
+  async function createHostQr(){
+    qrRole='host';var pc=rtc();qrConnection=pc;var ch=pc.createDataChannel('attendance');wireChannel(ch,'pending');
+    await pc.setLocalDescription(await pc.createOffer());await iceDone(pc);
+    openQrModal('Host QR','Student scans this QR, then shows the answer QR back to you.',enc(payload('offer',pc)));qrStatus('Host QR ready — waiting for student');
   }
-
-  function publicPeersUrl(){
-    var c = getPeerConfig();
-    return c.pages ? c.pages + '/peers.json?v=' + Date.now() : '';
+  async function acceptOffer(raw){
+    var o;try{o=dec(raw);}catch(e){toast('Invalid QR');return;}if(!o||o.app!=='attendance-qr-p2p'||o.type!=='offer'||o.room!==ROOM_ID){toast('Wrong attendance session');return;}
+    qrRole='student';var pc=rtc();qrConnection=pc;pc.ondatachannel=function(e){wireChannel(e.channel,o.from||'host');};
+    await pc.setRemoteDescription(o.description);await pc.setLocalDescription(await pc.createAnswer());await iceDone(pc);
+    openQrModal('Answer QR','Show this QR to the teacher to finish the connection.',enc(payload('answer',pc)));qrStatus('Answer ready — show it to teacher');
   }
-
-  async function readPublishedPeers(){
-    var url = publicPeersUrl();
-    if (!url) return [];
-    try{
-      var data = await fetch(url, { cache:'no-store' });
-      if (!data.ok) throw new Error('peers.json HTTP ' + data.status);
-      var peers = await data.json();
-      return Array.isArray(peers) ? peers : [];
-    }catch(e){
-      console.warn('peer directory unavailable', e);
-      return [];
-    }
+  async function acceptAnswer(raw){
+    var a;try{a=dec(raw);}catch(e){toast('Invalid answer QR');return;}if(!qrConnection||a.type!=='answer'||a.room!==ROOM_ID){toast('Answer does not match this session');return;}
+    await qrConnection.setRemoteDescription(a.description);closeQrModal();qrStatus('Connecting…');
   }
-
-  // ---------- 100% client-side QR WebRTC signaling ----------
-  // No GitHub API, Firebase, database, peer directory, or signaling server.
-  // The teacher creates a WebRTC offer and displays it as a QR code.
-  // A phone scans the offer, creates an answer and displays an answer QR.
-  // The teacher scans the answer QR. After that, attendance data travels
-  // directly over the WebRTC data channel.
-  var qrPeers = {};
-  var qrHostConnection = null;
-  var qrHostChannel = null;
-  var qrPendingOffer = null;
-  var qrPendingAnswer = null;
-  var qrRole = null;
-
-  function bytesToBase64(bytes){
-    var binary = '';
-    for (var i=0;i<bytes.length;i+=0x8000){
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i+0x8000));
-    }
-    return btoa(binary);
+  function scanQr(){
+    var input=document.getElementById('qrFile');input.click();
   }
-
-  function base64ToBytes(str){
-    var binary = atob(str);
-    var out = new Uint8Array(binary.length);
-    for (var i=0;i<binary.length;i++) out[i] = binary.charCodeAt(i);
-    return out;
-  }
-
-  function qrEncode(obj){
-    return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
-  }
-
-  function qrDecode(str){
-    return JSON.parse(decodeURIComponent(escape(atob(str.trim()))));
-  }
-
-  function qrIceConfig(){
-    // Public STUN only helps WebRTC find a direct route; no attendance
-    // payload is sent through it.
-    return {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
-    };
-  }
-
-  function waitIceComplete(pc, timeout){
-    return new Promise(function(resolve){
-      if (pc.iceGatheringState === 'complete'){
-        resolve();
-        return;
-      }
-      var done = false;
-      function finish(){
-        if (done) return;
-        done = true;
-        pc.removeEventListener('icegatheringstatechange', check);
-        resolve();
-      }
-      function check(){
-        if (pc.iceGatheringState === 'complete') finish();
-      }
-      pc.addEventListener('icegatheringstatechange', check);
-      setTimeout(finish, timeout || 8000);
-    });
-  }
-
-  function makeSignalPayload(type, pc){
-    return {
-      v: 1,
-      app: 'attendance-qr-p2p',
-      type: type,
-      room: ROOM_ID,
-      from: getDeviceId(),
-      description: pc.localDescription ? {
-        type: pc.localDescription.type,
-        sdp: pc.localDescription.sdp
-      } : null
-    };
-  }
-
-  function getDeviceId(){
-    try{
-      var k = 'attendance_device_id_v2';
-      var v = localStorage.getItem(k);
-      if (!v){
-        v = 'peer_' + crypto.randomUUID();
-        localStorage.setItem(k, v);
-      }
-      return v;
-    }catch(e){
-      return 'peer_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    }
-  }
-
-  function setQrStatus(text){
-    var el = document.getElementById('qrSyncStatus');
-    if (el) el.textContent = text;
-  }
-
-  function renderQrCode(text, targetId){
-    var el = document.getElementById(targetId);
-    if (!el) return;
-    el.innerHTML = '';
-    if (!text) return;
-
-    if (window.QRCode){
-      new QRCode(el, {
-        text: text,
-        width: 300,
-        height: 300,
-        correctLevel: QRCode.CorrectLevel.M
-      });
-      return;
-    }
-
-    // Fallback: show the payload in a selectable box if QR library fails.
-    var pre = document.createElement('textarea');
-    pre.readOnly = true;
-    pre.value = text;
-    pre.style.width = '100%';
-    pre.style.minHeight = '180px';
-    el.appendChild(pre);
-  }
-
-  function showQrModal(title, instruction, payload, mode){
-    var modal = document.getElementById('qrSignalModal');
-    if (!modal) return;
-    document.getElementById('qrSignalTitle').textContent = title;
-    document.getElementById('qrSignalInstruction').textContent = instruction;
-    document.getElementById('qrSignalMode').textContent = mode || '';
-    renderQrCode(payload, 'qrSignalCode');
-    modal.style.display = 'flex';
-  }
-
-  function closeQrModal(){
-    var modal = document.getElementById('qrSignalModal');
-    if (modal) modal.style.display = 'none';
-  }
-
-  function setupChannel(channel, peerId){
-    qrHostChannel = channel;
-    qrPeers[peerId] = { channel: channel, connectedAt: Date.now() };
-
-    channel.onopen = function(){
-      peerCount = Object.keys(qrPeers).filter(function(id){
-        return qrPeers[id].channel && qrPeers[id].channel.readyState === 'open';
-      }).length;
-      updatePeerBadge();
-      setQrStatus(peerCount + ' peer' + (peerCount === 1 ? '' : 's') + ' connected');
-      try{
-        channel.send(JSON.stringify({
-          type:'snapshot',
-          room:ROOM_ID,
-          dump:bytesToBase64(db.export())
-        }));
-      }catch(e){}
-    };
-
-    channel.onclose = function(){
-      delete qrPeers[peerId];
-      peerCount = Object.keys(qrPeers).length;
-      updatePeerBadge();
-      setQrStatus('peer disconnected');
-    };
-
-    channel.onerror = function(e){
-      console.warn('WebRTC data channel error', e);
-    };
-
-    channel.onmessage = function(event){
-      try{
-        var msg = JSON.parse(event.data);
-        if (!msg || msg.room !== ROOM_ID) return;
-
-        if (msg.type === 'snapshot' && msg.dump){
-          mergeExternalDump(base64ToBytes(msg.dump));
-          render();
-          return;
-        }
-
-        if (msg.type === 'mutation' && msg.mutation){
-          applyMutationLocally(msg.mutation);
-          render();
-        }
-      }catch(e){
-        console.warn('invalid peer message', e);
-      }
-    };
-  }
-
-  async function createQrOffer(){
-    qrRole = 'host';
-    var pc = new RTCPeerConnection(qrIceConfig());
-    qrHostConnection = pc;
-
-    var peerId = 'pending_' + Date.now();
-    var channel = pc.createDataChannel('attendance', { ordered:true });
-    setupChannel(channel, peerId);
-
-    pc.onconnectionstatechange = function(){
-      if (pc.connectionState === 'connected'){
-        closeQrModal();
-        setQrStatus('peer connected');
-      }else if (pc.connectionState === 'failed' ||
-                pc.connectionState === 'disconnected' ||
-                pc.connectionState === 'closed'){
-        setQrStatus('peer connection closed');
-      }
-    };
-
-    await pc.setLocalDescription(await pc.createOffer());
-    await waitIceComplete(pc, 10000);
-
-    var payload = makeSignalPayload('offer', pc);
-    qrPendingOffer = payload;
-
-    showQrModal(
-      'Step 1 — Scan this QR',
-      'On the student phone, open Attendance → Join session and scan this QR. The phone will then show an answer QR.',
-      qrEncode(payload),
-      'HOST OFFER'
-    );
-
-    return payload;
-  }
-
-  async function acceptQrOffer(encoded){
-    var offer;
-    try{
-      offer = typeof encoded === 'string' ? qrDecode(encoded) : encoded;
-    }catch(e){
-      toast('Invalid QR payload');
-      return;
-    }
-
-    if (!offer || offer.app !== 'attendance-qr-p2p' ||
-        offer.type !== 'offer' || offer.room !== ROOM_ID){
-      toast('This QR is not for this attendance session');
-      return;
-    }
-
-    qrRole = 'student';
-    var pc = new RTCPeerConnection(qrIceConfig());
-    qrHostConnection = pc;
-
-    pc.ondatachannel = function(event){
-      setupChannel(event.channel, offer.from || 'host');
-    };
-
-    pc.onconnectionstatechange = function(){
-      if (pc.connectionState === 'connected'){
-        closeQrModal();
-        setQrStatus('connected to host');
-      }else if (pc.connectionState === 'failed' ||
-                pc.connectionState === 'disconnected' ||
-                pc.connectionState === 'closed'){
-        setQrStatus('connection closed');
-      }
-    };
-
-    try{
-      await pc.setRemoteDescription(offer.description);
-      var answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await waitIceComplete(pc, 10000);
-
-      qrPendingAnswer = makeSignalPayload('answer', pc);
-      showQrModal(
-        'Step 2 — Show answer QR',
-        'Show this QR to the teacher. The teacher should scan it from the Join/Sync controls.',
-        qrEncode(qrPendingAnswer),
-        'STUDENT ANSWER'
-      );
-    }catch(e){
-      console.error(e);
-      toast('Could not create WebRTC answer');
-    }
-  }
-
-  async function acceptQrAnswer(encoded){
-    var answer;
-    try{
-      answer = typeof encoded === 'string' ? qrDecode(encoded) : encoded;
-    }catch(e){
-      toast('Invalid answer QR');
-      return;
-    }
-
-    if (!qrHostConnection ||
-        !answer ||
-        answer.app !== 'attendance-qr-p2p' ||
-        answer.type !== 'answer' ||
-        answer.room !== ROOM_ID){
-      toast('Answer does not match the open session');
-      return;
-    }
-
-    try{
-      await qrHostConnection.setRemoteDescription(answer.description);
-      closeQrModal();
-      setQrStatus('connecting to peer…');
-    }catch(e){
-      console.error(e);
-      toast('Could not accept answer');
-    }
-  }
-
-  function broadcastMutation(m){
-    Object.keys(qrPeers).forEach(function(id){
-      var ch = qrPeers[id] && qrPeers[id].channel;
-      if (!ch || ch.readyState !== 'open') return;
-      try{
-        ch.send(JSON.stringify({
-          type:'mutation',
-          room:ROOM_ID,
-          mutation:m
-        }));
-      }catch(e){}
-    });
-  }
-
-  function startQrJoin(){
-    if (qrRole === 'host'){
-      toast('Use the host QR or scan a student answer');
-      return;
-    }
-    document.getElementById('qrJoinInput').click();
-  }
-
-  function handleQrText(text){
-    if (!text) return;
-    var payload;
-    try{ payload = qrDecode(text); }
-    catch(e){ toast('Invalid QR data'); return; }
-
-    if (payload.type === 'offer') acceptQrOffer(text);
-    else if (payload.type === 'answer') acceptQrAnswer(text);
-    else toast('Unknown attendance QR');
-  }
-
-  function openQrScanner(){
-    var input = document.getElementById('qrJoinInput');
-    if (!input) return;
-    input.click();
-  }
-
-  function connectRoom(){
-    deviceId = getDeviceId();
-    peerCount = 0;
-    updatePeerBadge();
-    setQrStatus('client-side QR mode — no server required');
-
-    // No persistent connection is opened here. The teacher explicitly starts
-    // a QR handshake, and each student joins by scanning the host QR.
-    forceResync = function(){
-      Object.keys(qrPeers).forEach(function(id){
-        var ch = qrPeers[id] && qrPeers[id].channel;
-        if (ch && ch.readyState === 'open'){
-          try{
-            ch.send(JSON.stringify({
-              type:'snapshot',
-              room:ROOM_ID,
-              dump:bytesToBase64(db.export())
-            }));
-          }catch(e){}
-        }
-      });
-      toast('Peer snapshot sent');
-    };
-  }
+  function sendMutationToPeers(m){Object.keys(qrPeers).forEach(function(id){var c=qrPeers[id].channel;if(c&&c.readyState==='open')try{c.send(JSON.stringify({type:'mutation',room:ROOM_ID,mutation:m}));}catch(e){}});}
+  function connectRoom(){deviceId();forceResync=function(){Object.keys(qrPeers).forEach(function(id){var c=qrPeers[id].channel;if(c&&c.readyState==='open')sendSnapshot(c);});toast('Snapshot sent to connected peers');};updatePeerBadge();}
 
   // ---------- shared render helpers ----------
   var viewEl = document.getElementById('view');
@@ -842,6 +406,12 @@
       '<div class="muted">' + escapeHtml(todayStr) + '</div></div>';
     html += '</div>';
 
+    html += '<div class="card">';
+    html += '<h2 class="section">Connect to teacher</h2>';
+    html += '<div class="muted" style="margin-bottom:8px;">Scan the teacher host QR once. Your phone will create an answer QR for the teacher.</div>';
+    html += '<button class="btn" id="joinHostBtn">Join teacher with QR</button>';
+    html += '</div>';
+
     html += '<div class="card" style="text-align:center;">';
     if (alreadyMarked){
       html += '<div class="stamp big">Present</div>';
@@ -883,6 +453,7 @@
         toast('You\'re marked present');
       });
     }
+    var joinBtn=document.getElementById('joinHostBtn'); if(joinBtn) joinBtn.addEventListener('click',scanQr);
     document.getElementById('notMe').addEventListener('click', function(){
       if (!confirm('Clear this device\'s registration? You\'ll need to sign the register again.')) return;
       clearProfile();
@@ -935,10 +506,10 @@
     html += '</div>';
 
     html += '<div class="card qr-box">';
-    html += '<h2 class="section" style="text-align:left;">Show this to your class</h2>';
-    html += '<img id="qrImg" width="200" height="200" alt="QR code linking to this register" src="">';
-    html += '<div class="link-copy"><code id="linkText"></code><button class="btn secondary" id="copyLink">Copy link</button></div>';
-    html += '<div class="muted" style="margin-top:6px;">Students scan once to register, then again each class to check in — open the session first. Devices register in the shared GitHub Pages peer directory; keep the page open briefly after registering so the device publishes its latest state.</div>';
+    html += '<h2 class="section" style="text-align:left;">Connect student devices</h2>';
+    html += '<div class="muted" style="margin-bottom:10px;">100% client-side signaling. Create one host QR per student connection.</div>';
+    html += '<div class="row"><button class="btn" id="hostQrBtn">Create host QR</button><button class="btn secondary" id="scanAnswerBtn">Scan student answer</button></div>';
+    html += '<div class="muted" id="qrSyncStatus" style="margin-top:8px;">No peer connected</div>';
     html += '</div>';
 
     html += '<div class="card">';
@@ -976,43 +547,10 @@
     html += '<div class="row"><label class="field">New PIN<input type="text" id="newPin" placeholder="' + escapeHtml(getSetting('pin','0000')) + '"></label>';
     html += '<button class="btn secondary" id="savePin" style="align-self:flex-end;">Save PIN</button></div>';
     html += '</div>';
-html += '<div class="row" style="margin-top:8px;">';
-    html += '<label class="field">GitHub token<input type="password" id="ghToken" placeholder="fine-grained token: Contents Read/Write"></label>';
-    html += '<button class="btn" id="saveGithub" style="align-self:flex-end;">Register device</button>';
-    html += '<button class="btn secondary" id="githubSyncNow" style="align-self:flex-end;">Sync now</button>';
-    html += '</div>';
-    html += '<div class="muted" style="margin-top:8px;">The repository should publish <code>peers.json</code> and the <code>state/</code> folder through GitHub Pages. For multiple devices, use one shared repository and a token on devices that need to publish.</div>';
-    html += '</div>';
 
-    html += '<div class="card">
-  <h2 class="section">QR-code peer connection</h2>
-  <div class="muted" style="margin-bottom:10px;">
-    100% client-side. No GitHub, Firebase, signaling server, or account is required.
-    The teacher shows an offer QR; each phone scans it and shows an answer QR; the
-    teacher scans the answer to establish direct WebRTC sync.
-  </div>
-  <div class="row">
-    <button class="btn" id="createHostQr">Create host QR</button>
-    <button class="btn secondary" id="scanPeerQr">Scan peer answer</button>
-    <button class="btn secondary" id="joinHostQr">Join host with QR</button>
-  </div>
-  <div id="qrSyncStatus" class="muted" style="margin-top:10px;">Ready for QR connection</div>
-  <div style="margin-top:8px;font-size:12px;" class="muted">
-    For the teacher: Create host QR → student scans → student shows answer QR → Scan peer answer.
-    For a student: Join host with QR → scan teacher's QR → show the answer QR.
-  </div>
-</div>
-
-<div class="card"><h2 class="section">Sync room</h2><div class="muted">Room code: <code>' + escapeHtml(ROOM_ID) + '</code>. The room now identifies the shared peer group; GitHub Pages provides the persistent peer directory and state snapshots instead of WebRTC tracker discovery.</div></div>';
+    html += '<div class="card"><h2 class="section">Client-side peer connection</h2><div class="muted">Room code baked into this file: <code>' + escapeHtml(ROOM_ID) + '</code> — every device running this exact file syncs together. Change it in the source before a new semester to start a fresh roster.</div></div>';
 
     viewEl.innerHTML = html;
-
-    var link = window.location.href;
-    document.getElementById('qrImg').src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(link);
-    document.getElementById('linkText').textContent = link;
-    document.getElementById('copyLink').addEventListener('click', function(){
-      navigator.clipboard.writeText(link).then(function(){ toast('Link copied'); }).catch(function(){ toast('Could not copy — copy it manually'); });
-    });
 
     document.getElementById('reportDate').addEventListener('change', function(e){
       state.reportDate = e.target.value;
@@ -1022,6 +560,9 @@ html += '<div class="row" style="margin-top:8px;">';
     document.getElementById('toggleSession').addEventListener('click', function(){
       doMutation({ type: 'SET_SESSION', date: state.reportDate, open: !sessionOpen });
     });
+
+    document.getElementById('hostQrBtn').addEventListener('click', function(){ createHostQr().catch(function(e){console.error(e);toast('Could not create host QR');}); });
+    document.getElementById('scanAnswerBtn').addEventListener('click', scanQr);
 
     document.getElementById('resyncBtn').addEventListener('click', function(){
       if (forceResync) forceResync(); else toast('Not connected to any peers');
@@ -1076,46 +617,11 @@ html += '<div class="row" style="margin-top:8px;">';
       });
     });
 
-    document.getElementById('createHostQr').addEventListener('click', function(){
-      createQrOffer().catch(function(e){
-        console.error(e);
-        toast('Could not create host QR');
-      });
-    });
-
-    document.getElementById('scanPeerQr').addEventListener('click', openQrScanner);
-    document.getElementById('joinHostQr').addEventListener('click', openQrScanner);
-
-    document.getElementById('qrJoinInput').addEventListener('change', async function(){
-      var file = this.files && this.files[0];
-      this.value = '';
-      if (!file) return;
-
-      // Browser QR decoding support varies. Use BarcodeDetector when available.
-      if ('BarcodeDetector' in window){
-        try{
-          var detector = new BarcodeDetector({formats:['qr_code']});
-          var bitmap = await createImageBitmap(file);
-          var codes = await detector.detect(bitmap);
-          if (codes.length) {
-            handleQrText(codes[0].rawValue);
-            return;
-          }
-        }catch(e){ console.warn('BarcodeDetector failed', e); }
-      }
-
-      // If the browser lacks native QR image decoding, show a concise fallback.
-      toast('QR image scanning is not supported by this browser. Use a browser with BarcodeDetector or paste the QR payload.');
-    });
-
     document.getElementById('savePin').addEventListener('click', function(){
       var val = document.getElementById('newPin').value.trim();
       if (!val){ toast('Enter a PIN first'); return; }
       doMutation({ type: 'SET_SETTING', key: 'pin', value: val });
       toast('PIN updated');
-    });
-})
-        .catch(function(){ toast('Sync failed — check GitHub settings'); });
     });
   }
 
@@ -1130,40 +636,34 @@ html += '<div class="row" style="margin-top:8px;">';
   document.getElementById('tabCheckin').addEventListener('click', function(){ state.tab = 'checkin'; render(); });
   document.getElementById('tabRegister').addEventListener('click', function(){ state.tab = 'register'; render(); });
 
-  (function boot(){
+  (async function boot(){
     updatePeerBadge();
     render();
-    initSqlJs({ locateFile: function(f){ return 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/' + f; } })
-      .then(function(SQLModule){
-        SQL = SQLModule;
-        return idbGet('sqlite');
-      })
-      .then(function(savedBytes){
-        db = savedBytes ? new SQL.Database(new Uint8Array(savedBytes)) : new SQL.Database();
-        runSchema();
-        state.profile = loadProfile();
-        connectRoom();
-        state.loading = false;
-        render();
-      })
-      .catch(function(e){
-        console.error('startup failed', e);
-        viewEl.innerHTML = '<div class="empty">Could not start the local database. Try reloading the page.</div>';
-      });
+    try{
+      db=await loadDb();
+      state.profile=loadProfile();
+      connectRoom();
+      state.loading=false;
+      render();
+    }catch(e){
+      console.error(e);state.loading=false;
+      viewEl.innerHTML='<div class="empty">Could not open local storage. <button class="btn" onclick="location.reload()">Retry</button></div>';
+    }
   })();
+
+  window.addEventListener('DOMContentLoaded', function(){
+    var qrf=document.getElementById('qrFile');
+    if(!qrf)return;
+    qrf.addEventListener('change', async function(){
+      var file=this.files&&this.files[0];this.value='';if(!file)return;
+      if('BarcodeDetector' in window){
+        try{var d=new BarcodeDetector({formats:['qr_code']});var b=await createImageBitmap(file);var codes=await d.detect(b);if(codes.length){var raw=codes[0].rawValue;var o=dec(raw);if(o.type==='offer')await acceptOffer(raw);else if(o.type==='answer')await acceptAnswer(raw);return;}}catch(e){console.warn(e);}
+      }
+      toast('QR image decoding is unavailable in this browser. Use Chrome/Edge on Android, or use the signal text fallback.');
+    });
+  });
 })();
 </script>
-
-<div id="qrSignalModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);align-items:center;justify-content:center;padding:20px;">
-  <div style="background:var(--card,#fff);color:var(--text,#111);width:min(480px,100%);max-height:92vh;overflow:auto;border-radius:16px;padding:20px;text-align:center;box-shadow:0 12px 50px rgba(0,0,0,.35);">
-    <h2 id="qrSignalTitle" style="margin-top:0;">QR WebRTC</h2>
-    <p id="qrSignalInstruction" class="muted"></p>
-    <div id="qrSignalMode" class="muted" style="font-size:12px;margin-bottom:10px;"></div>
-    <div id="qrSignalCode" style="display:flex;justify-content:center;margin:12px 0;min-height:40px;"></div>
-    <button class="btn secondary" onclick="closeQrModal()">Close</button>
-  </div>
-</div>
-<input id="qrJoinInput" type="file" accept="image/*" capture="environment" style="display:none">
 
 </body>
 </html>

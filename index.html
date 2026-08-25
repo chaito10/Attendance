@@ -403,6 +403,67 @@
     }
   }
 
+  // ---------- GitHub Pages / GitHub repository sync ----------
+  // Pages is the static/public read layer. The GitHub Contents API is used
+  // only by devices that have a token to publish. Readers can discover peers
+  // directly from the public repository API as a fallback, so Pages cache
+  // propagation cannot make an otherwise registered peer invisible.
+
+  async function githubApi(url){
+    var res = await fetch(url, {
+      cache: 'no-store',
+      headers: { 'Accept': 'application/vnd.github+json' }
+    });
+    if (!res.ok) throw new Error('GitHub API HTTP ' + res.status);
+    return res.json();
+  }
+
+  function githubContentsUrl(path){
+    var c = getPeerConfig();
+    return 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
+      '/' + encodeURIComponent(c.repo) + '/contents/' + path +
+      '?ref=' + encodeURIComponent(c.branch) + '&t=' + Date.now();
+  }
+
+  function decodeGithubContent(content){
+    var raw = atob(String(content || '').replace(/\n/g, ''));
+    return decodeURIComponent(escape(raw));
+  }
+
+  async function readPublishedPeers(){
+    var c = getPeerConfig();
+    if (!c.owner || !c.repo) return [];
+
+    // Primary: GitHub Pages static file.
+    if (c.pages){
+      try{
+        var pageRes = await fetch(c.pages + '/peers.json?v=' + Date.now(), {cache:'no-store'});
+        if (pageRes.ok){
+          var pagePeers = await pageRes.json();
+          if (Array.isArray(pagePeers)) return pagePeers;
+        }
+      }catch(e){ console.warn('Pages peer directory unavailable', e); }
+    }
+
+    // Fallback: public GitHub repository contents API.
+    try{
+      var listing = await githubApi(githubContentsUrl('peers'));
+      if (!Array.isArray(listing)) return [];
+      var peers = [];
+      for (var i=0;i<listing.length;i++){
+        if (!listing[i] || !listing[i].download_url) continue;
+        try{
+          var r = await fetch(listing[i].download_url + '?v=' + Date.now(), {cache:'no-store'});
+          if (r.ok) peers.push(await r.json());
+        }catch(e){}
+      }
+      return peers;
+    }catch(e){
+      console.warn('GitHub peer directory unavailable', e);
+      return [];
+    }
+  }
+
   async function publishPeerRecord(){
     var token = '';
     try { token = localStorage.getItem('attendance_github_token_v1') || ''; } catch(e){}
@@ -422,36 +483,105 @@
       '/' + encodeURIComponent(c.repo) + '/contents/' + path;
 
     try{
-      var current = await fetchJson(api + '?ref=' + encodeURIComponent(c.branch), {
-        headers: {
-          'Authorization': 'Bearer ' + token,
-          'Accept': 'application/vnd.github+json'
+      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
+        cache:'no-store',
+        headers:{
+          'Authorization':'Bearer ' + token,
+          'Accept':'application/vnd.github+json'
         }
-      }).catch(function(){ return null; });
+      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
 
       var body = JSON.stringify(peer, null, 2);
       var b64 = btoa(unescape(encodeURIComponent(body)));
       var payload = {
-        message: 'Register attendance peer ' + deviceId,
-        content: b64,
-        branch: c.branch
+        message:'Register/update attendance peer ' + deviceId,
+        content:b64,
+        branch:c.branch
       };
       if (current && current.sha) payload.sha = current.sha;
 
       var put = await fetch(api, {
-        method: 'PUT',
-        headers: {
-          'Authorization': 'Bearer ' + token,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json'
+        method:'PUT',
+        cache:'no-store',
+        headers:{
+          'Authorization':'Bearer ' + token,
+          'Accept':'application/vnd.github+json',
+          'Content-Type':'application/json'
         },
-        body: JSON.stringify(payload)
+        body:JSON.stringify(payload)
       });
-      if (!put.ok) throw new Error('GitHub register HTTP ' + put.status);
+      if (!put.ok) throw new Error('GitHub peer registration HTTP ' + put.status);
+
+      // Maintain peers.json as a convenience for GitHub Pages readers.
+      // Peer discovery does NOT depend on this file because the repository
+      // API fallback above reads the individual peer records directly.
+      await updatePublishedPeerIndex(peer, token).catch(function(e){
+        console.warn('peers.json update skipped:', e);
+      });
       return true;
     }catch(e){
       console.warn('peer registration failed', e);
       return false;
+    }
+  }
+
+  async function updatePublishedPeerIndex(peer, token){
+    var c = getPeerConfig();
+    var api = 'https://api.github.com/repos/' + encodeURIComponent(c.owner) +
+      '/' + encodeURIComponent(c.repo) + '/contents/peers.json';
+
+    try{
+      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
+        cache:'no-store',
+        headers:{
+          'Authorization':'Bearer ' + token,
+          'Accept':'application/vnd.github+json'
+        }
+      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
+
+      var peers = [];
+      if (current && current.content){
+        try{
+          peers = JSON.parse(decodeGithubContent(current.content));
+          if (!Array.isArray(peers)) peers = [];
+        }catch(e){ peers = []; }
+      }
+
+      var replaced = false;
+      peers = peers.map(function(x){
+        if (x && x.id === peer.id){ replaced = true; return peer; }
+        return x;
+      });
+      if (!replaced) peers.push(peer);
+
+      var cutoff = Date.now() - 30*24*60*60*1000;
+      peers = peers.filter(function(x){
+        return x && x.id && x.lastSeen &&
+          new Date(x.lastSeen).getTime() >= cutoff;
+      });
+
+      var body = JSON.stringify(peers, null, 2);
+      var payload = {
+        message:'Update attendance peer directory',
+        content:btoa(unescape(encodeURIComponent(body))),
+        branch:c.branch
+      };
+      if (current && current.sha) payload.sha = current.sha;
+
+      var put = await fetch(api, {
+        method:'PUT',
+        cache:'no-store',
+        headers:{
+          'Authorization':'Bearer ' + token,
+          'Accept':'application/vnd.github+json',
+          'Content-Type':'application/json'
+        },
+        body:JSON.stringify(payload)
+      });
+      if (!put.ok) throw new Error('peers.json HTTP ' + put.status);
+      return true;
+    }catch(e){
+      throw e;
     }
   }
 
@@ -462,15 +592,15 @@
       return p && p.room === ROOM_ID && p.id !== deviceId &&
         p.lastSeen && new Date(p.lastSeen).getTime() > cutoff;
     });
+
     refreshPeerStatus(active.length, active.length
-      ? active.length + ' device' + (active.length === 1 ? '' : 's') + ' linked'
-      : 'no registered peers yet');
+      ? active.length + ' peer' + (active.length === 1 ? '' : 's') + ' connected'
+      : 'no connected peers');
+
     return active;
   }
 
   async function publishPublicState(){
-    // Optional state snapshot. GitHub Pages can serve it to peers.
-    // A token is required only on the publishing device.
     var token = '';
     try { token = localStorage.getItem('attendance_github_token_v1') || ''; } catch(e){}
     var c = getPeerConfig();
@@ -481,67 +611,92 @@
       '/' + encodeURIComponent(c.repo) + '/contents/' + path;
 
     try{
-      var bytes = Array.from(db.export());
-      var payloadData = JSON.stringify({
-        id: deviceId,
-        room: ROOM_ID,
-        updatedAt: new Date().toISOString(),
-        sqlite: bytes
-      });
-      var b64 = btoa(unescape(encodeURIComponent(payloadData)));
-      var current = await fetchJson(api + '?ref=' + encodeURIComponent(c.branch), {
-        headers: {
-          'Authorization': 'Bearer ' + token,
-          'Accept': 'application/vnd.github+json'
+      var envelope = {
+        id:deviceId,
+        room:ROOM_ID,
+        updatedAt:new Date().toISOString(),
+        sqlite:Array.from(db.export())
+      };
+      var body = JSON.stringify(envelope);
+      var current = await fetch(api + '?ref=' + encodeURIComponent(c.branch), {
+        cache:'no-store',
+        headers:{
+          'Authorization':'Bearer ' + token,
+          'Accept':'application/vnd.github+json'
         }
-      }).catch(function(){ return null; });
+      }).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
 
       var payload = {
-        message: 'Publish attendance state ' + deviceId,
-        content: b64,
-        branch: c.branch
+        message:'Publish attendance state ' + deviceId,
+        content:btoa(unescape(encodeURIComponent(body))),
+        branch:c.branch
       };
       if (current && current.sha) payload.sha = current.sha;
 
       var put = await fetch(api, {
         method:'PUT',
+        cache:'no-store',
         headers:{
           'Authorization':'Bearer ' + token,
           'Accept':'application/vnd.github+json',
           'Content-Type':'application/json'
         },
-        body: JSON.stringify(payload)
+        body:JSON.stringify(payload)
       });
-      return put.ok;
+      if (!put.ok) throw new Error('state publish HTTP ' + put.status);
+      return true;
     }catch(e){
       console.warn('state publish failed', e);
       return false;
     }
   }
 
-  async function pullPublicStates(){
+  async function readPeerState(peer){
     var c = getPeerConfig();
-    if (!c.pages || !db) return;
-    var peers = await discoverPeers();
-    for (var i=0;i<peers.length;i++){
-      var p = peers[i];
+    var path = 'state/' + encodeURIComponent(peer.id) + '.bin.json';
+
+    // Primary: Pages.
+    if (c.pages){
       try{
-        var url = c.pages + '/state/' + encodeURIComponent(p.id) + '.bin.json?v=' + Date.now();
-        var res = await fetch(url, {cache:'no-store'});
-        if (!res.ok) continue;
-        var envelope = await res.json();
-        if (!envelope || !Array.isArray(envelope.sqlite)) continue;
-        mergeExternalDump(new Uint8Array(envelope.sqlite));
-      }catch(e){ console.warn('state pull failed', e); }
+        var r = await fetch(c.pages + '/' + path + '?v=' + Date.now(), {cache:'no-store'});
+        if (r.ok) return await r.json();
+      }catch(e){}
     }
+
+    // Fallback: public GitHub repository contents API.
+    try{
+      var obj = await githubApi(githubContentsUrl(path));
+      return JSON.parse(decodeGithubContent(obj.content));
+    }catch(e){
+      console.warn('could not read peer state', peer.id, e);
+      return null;
+    }
+  }
+
+  async function pullPublicStates(){
+    if (!db) return;
+    var peers = await discoverPeers();
+    var merged = 0;
+
+    for (var i=0;i<peers.length;i++){
+      var envelope = await readPeerState(peers[i]);
+      if (!envelope || envelope.room !== ROOM_ID ||
+          !Array.isArray(envelope.sqlite)) continue;
+      mergeExternalDump(new Uint8Array(envelope.sqlite));
+      merged++;
+    }
+
     render();
+    return merged;
   }
 
   async function syncViaGithub(){
-    if (!githubConfigured) return;
-    await publishPeerRecord();
-    await publishPublicState();
+    if (!githubConfigured) return {registered:false, published:false, peers:0};
+    var registered = await publishPeerRecord();
+    var published = await publishPublicState();
+    var peers = await discoverPeers();
     await pullPublicStates();
+    return {registered:registered, published:published, peers:peers.length};
   }
 
   function connectRoom(){
@@ -549,29 +704,38 @@
     var c = getPeerConfig();
     githubConfigured = !!(c.owner && c.repo && c.pages);
 
-    // WebRTC is deliberately not required anymore. GitHub Pages acts as the
-    // persistent rendezvous directory and static state transport.
     if (!githubConfigured){
       refreshPeerStatus(0, 'configure GitHub Pages sync');
       forceResync = function(){ toast('Configure GitHub Pages sync first'); };
       return;
     }
 
-    syncViaGithub().catch(function(e){ console.warn('initial sync failed', e); });
+    function runSync(showToast){
+      syncViaGithub().then(function(result){
+        if (showToast){
+          if (!result.registered){
+            toast('GitHub registration failed — check token/repo');
+          } else if (result.peers === 0){
+            toast('Registered, but no other active peer found');
+          } else {
+            toast('Synced with ' + result.peers + ' peer' + (result.peers === 1 ? '' : 's'));
+          }
+        }
+      }).catch(function(e){
+        console.error('sync failed', e);
+        refreshPeerStatus(0, 'sync error — check GitHub settings');
+        if (showToast) toast('Sync failed — check GitHub settings');
+      });
+    }
+
+    runSync(false);
     clearInterval(syncTimer);
-    syncTimer = setInterval(function(){
-      syncViaGithub().catch(function(e){ console.warn('periodic sync failed', e); });
-    }, SYNC_INTERVAL_MS);
+    syncTimer = setInterval(function(){ runSync(false); }, SYNC_INTERVAL_MS);
 
     broadcastMutation = function(){
-      // Mutations are persisted locally immediately. The next GitHub sync
-      // publishes the complete local database snapshot.
-      syncViaGithub().catch(function(e){ console.warn('mutation sync failed', e); });
+      runSync(false);
     };
-    forceResync = function(){
-      syncViaGithub().then(function(){ toast('GitHub sync requested'); })
-        .catch(function(){ toast('Could not sync with GitHub Pages'); });
-    };
+    forceResync = function(){ runSync(true); };
   }
 
   // ---------- shared render helpers ----------
@@ -884,10 +1048,21 @@
       GITHUB_PAGES_BASE = pages;
       try { localStorage.setItem('attendance_github_token_v1', token); } catch(e){}
       githubConfigured = true;
-      syncViaGithub().then(function(){
-        toast('Device registered and synced');
+      deviceId = getDeviceId();
+      clearInterval(syncTimer);
+      syncViaGithub().then(function(result){
+        if (!result.registered){
+          toast('GitHub registration failed — check token/repo');
+          return;
+        }
+        syncTimer = setInterval(function(){
+          syncViaGithub().catch(function(e){ console.warn('periodic sync failed', e); });
+        }, SYNC_INTERVAL_MS);
+        toast(result.peers
+          ? 'Registered — ' + result.peers + ' peer found'
+          : 'Registered — waiting for another peer');
       }).catch(function(){
-        toast('Registration saved; sync will retry');
+        toast('Registration failed — check GitHub settings');
       });
     });
 

@@ -1,5 +1,8 @@
 # QR Attendance
 
+![Version](https://img.shields.io/github/v/release/chaito10/Attendance)
+![License](https://img.shields.io/github/license/chaito10/Attendance)
+
 A single-file QR-based attendance system for small classrooms. Teachers start an
 attendance session on their PC, display a QR code, and students scan it with their
 phones (on the same Wi-Fi/LAN) to mark themselves present.
@@ -20,6 +23,15 @@ database.
 
 ## Install
 
+### Windows (Scoop)
+
+```bash
+scoop bucket add chaito10 https://github.com/chaito10/scoop-bucket
+scoop install attendance
+```
+
+### From source
+
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
@@ -28,7 +40,13 @@ uv sync
 
 ## Run
 
-Production (via Waitress, multi-threaded):
+After installing via Scoop, run the packaged Windows binary:
+
+```bash
+attendance
+```
+
+From source (production, via Waitress, multi-threaded):
 
 ```bash
 uv run attendance
@@ -95,4 +113,23 @@ ATTENDANCE_PASSWORD="hunter2" ATTENDANCE_DB="/srv/attendance/attendance.db" uv r
 src/attendance/__init__.py   # the entire application (single file)
 attendance.db                # SQLite database (created at runtime)
 pyproject.toml               # build + dependency metadata
+packaging/entry.py           # PyInstaller entry point for the Windows binary
 ```
+
+## Build a Windows binary
+
+A standalone Windows `.exe` is built with PyInstaller and published as a release
+artifact for the Scoop bucket:
+
+```bash
+uv sync --group dev
+python -m PyInstaller --onefile --console --name attendance --clean packaging/entry.py
+```
+
+The resulting `dist/attendance.exe` can be run directly or zipped into a release
+asset.
+
+## License
+
+[MIT](LICENSE)
+

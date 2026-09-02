@@ -12,3 +12,6 @@ env/
 
 # Application data
 attendance.db
+
+# Docs site output (MkDocs)
+site/

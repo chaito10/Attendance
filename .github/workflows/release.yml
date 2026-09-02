@@ -1,0 +1,106 @@
+name: Build & Release Binaries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish assets to (e.g. v0.1.1). The tag must already exist."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+      - name: Create release (if it does not exist)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          PRE=""
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || PRE="--prerelease"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" $PRE --generate-notes
+          else
+            echo "Release $TAG already exists; uploading assets only."
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: macos-14
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x86_64
+          - os: windows-latest
+            target: win64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync dependencies
+        run: uv sync --group dev
+      - name: Build binary with PyInstaller
+        run: uv run pyinstaller --onefile --console --name attendance --clean packaging/entry.py
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(echo "${{ needs.create-release.outputs.tag }}" | sed 's/^v//')"
+          BIN="dist/attendance"
+          chmod +x "${BIN}"
+          ARCHIVE="attendance-${VER}-${{ matrix.target }}.tar.gz"
+          tar -czf "${ARCHIVE}" "${BIN}"
+          echo "ARTIFACT=${ARCHIVE}" >> "${GITHUB_ENV}"
+          echo "SHA256=$(sha256sum "${ARCHIVE}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+          echo "CAPTURE_HASH=${ARCHIVE}|$(sha256sum "${ARCHIVE}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VER = ("${{ needs.create-release.outputs.tag }}" -replace '^v','')
+          $ARCHIVE = "attendance-${VER}-${{ matrix.target }}.zip"
+          Compress-Archive -Path 'dist\attendance.exe' -DestinationPath $ARCHIVE
+          $HASH = (Get-FileHash $ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          "ARTIFACT=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHA256=$HASH" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CAPTURE_HASH=$ARCHIVE|$HASH" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Print artifact hash
+        run: |
+          echo "## Binary artifact" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- File: \`${{ matrix.target }}\` -> \`${ARTIFACT}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- SHA256: \`${SHA256}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "CAPTURE_HASH=${CAPTURE_HASH}"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.create-release.outputs.tag }}" "$ARTIFACT" --clobber --repo "${{ github.repository }}"

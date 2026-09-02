@@ -1,6 +1,6 @@
 [project]
 name = "attendance"
-version = "0.1.0"
+version = "0.1.1"
 description = "Single-file QR Attendance System"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,8 @@ attendance = "attendance:main"
 [dependency-groups]
 dev = [
     "pyinstaller>=6.11",
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
 ]
 
 [build-system]

@@ -2,6 +2,8 @@
 
 ![Version](https://img.shields.io/github/v/release/chaito10/Attendance)
 ![License](https://img.shields.io/github/license/chaito10/Attendance)
+![Docs](https://img.shields.io/badge/docs-gh--pages-1f6feb)
+![Platforms](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey)
 
 A single-file QR-based attendance system for small classrooms. Teachers start an
 attendance session on their PC, display a QR code, and students scan it with their
@@ -9,6 +11,8 @@ phones (on the same Wi-Fi/LAN) to mark themselves present.
 
 Built with **Flask**, served in production by **Waitress**, with a **SQLite**
 database.
+
+> **Documentation:** [chaito10.github.io/Attendance](https://chaito10.github.io/Attendance)
 
 ## Features
 
@@ -23,11 +27,29 @@ database.
 
 ## Install
 
+Standalone binaries for **Windows, Linux x86_64, and macOS (arm64 & x86_64)** are
+attached to every [release](https://github.com/chaito10/Attendance/releases/latest).
+See the [install guides](https://chaito10.github.io/Attendance/install/windows/) for
+full instructions.
+
 ### Windows (Scoop)
 
 ```bash
 scoop bucket add chaito10 https://github.com/chaito10/scoop-bucket
 scoop install attendance
+```
+
+### Windows / Linux / macOS (download)
+
+Download `attendance-v0.1.1-win64.zip` (Windows), or the
+`attendance-v0.1.1-linux-x86_64.tar.gz` / `attendance-v0.1.1-macos-arm64.tar.gz` /
+`attendance-v0.1.1-macos-x86_64.tar.gz` archives for Unix, from the
+[releases page](https://github.com/chaito10/Attendance/releases/latest). On Unix:
+
+```bash
+tar xzf attendance-v0.1.1-linux-x86_64.tar.gz
+chmod +x attendance
+./attendance
 ```
 
 ### From source
@@ -113,21 +135,24 @@ ATTENDANCE_PASSWORD="hunter2" ATTENDANCE_DB="/srv/attendance/attendance.db" uv r
 src/attendance/__init__.py   # the entire application (single file)
 attendance.db                # SQLite database (created at runtime)
 pyproject.toml               # build + dependency metadata
-packaging/entry.py           # PyInstaller entry point for the Windows binary
+packaging/entry.py           # PyInstaller entry point
+attendance.spec              # PyInstaller spec
+docs/                        # documentation site (MkDocs)
+mkdocs.yml                   # MkDocs configuration
+.github/workflows/docs.yml   # builds & deploys the docs site to GitHub Pages
+.github/workflows/release.yml# builds & attaches Windows/Linux/macOS binaries
 ```
 
-## Build a Windows binary
+## Build a binary
 
-A standalone Windows `.exe` is built with PyInstaller and published as a release
-artifact for the Scoop bucket:
+PyInstaller cannot cross-compile, so the released binaries are built in CI
+(`.github/workflows/release.yml`) on each `v*` tag for Windows, Linux x86_64,
+macOS arm64, and macOS x86_64. To build a binary for your current OS locally:
 
 ```bash
 uv sync --group dev
-python -m PyInstaller --onefile --console --name attendance --clean packaging/entry.py
+uv run PyInstaller --onefile --console --name attendance --clean packaging/entry.py
 ```
-
-The resulting `dist/attendance.exe` can be run directly or zipped into a release
-asset.
 
 ## License
 

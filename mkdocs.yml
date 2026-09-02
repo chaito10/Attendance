@@ -1,0 +1,57 @@
+site_name: QR Attendance
+site_description: Documentation for the QR Attendance System - single-file, local Wi-Fi QR attendance for classrooms
+site_url: https://chaito10.github.io/Attendance/
+repo_url: https://github.com/chaito10/Attendance
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Installation:
+      - Windows: install/windows.md
+      - Linux: install/linux.md
+      - macOS: install/macos.md
+  - Usage: usage.md
+  - API Reference: api.md
+  - Development: development.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+copyright: Copyright &copy; 2026 charudatta10

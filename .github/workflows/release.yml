@@ -75,7 +75,7 @@ jobs:
           VER="$(echo "${{ needs.create-release.outputs.tag }}" | sed 's/^v//')"
           BIN="dist/attendance"
           chmod +x "${BIN}"
-          ARCHIVE="attendance-${VER}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="attendance-v${VER}-${{ matrix.target }}.tar.gz"
           tar -czf "${ARCHIVE}" "${BIN}"
           echo "ARTIFACT=${ARCHIVE}" >> "${GITHUB_ENV}"
           echo "SHA256=$(sha256sum "${ARCHIVE}" | awk '{print $1}')" >> "${GITHUB_ENV}"
@@ -86,7 +86,7 @@ jobs:
         shell: pwsh
         run: |
           $VER = ("${{ needs.create-release.outputs.tag }}" -replace '^v','')
-          $ARCHIVE = "attendance-${VER}-${{ matrix.target }}.zip"
+          $ARCHIVE = "attendance-v${VER}-${{ matrix.target }}.zip"
           Compress-Archive -Path 'dist\attendance.exe' -DestinationPath $ARCHIVE
           $HASH = (Get-FileHash $ARCHIVE -Algorithm SHA256).Hash.ToLower()
           "ARTIFACT=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -101,6 +101,8 @@ jobs:
           echo "CAPTURE_HASH=${CAPTURE_HASH}"
 
       - name: Upload to release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.create-release.outputs.tag }}" "$ARTIFACT" --clobber --repo "${{ github.repository }}"
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" "${ARTIFACT}" --clobber --repo "${{ github.repository }}"

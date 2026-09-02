@@ -3,26 +3,42 @@
 Single-file QR Attendance System
 --------------------------------
 Install:
-    pip install flask qrcode[pil]
+    pip install flask qrcode[pil] waitress
 
-Run:
-    python attendance.py
+Run (production, via Waitress):
+    attendance
+    python -m attendance
+
+Run (development, Flask dev server):
+    attendance --dev
+    python -m attendance --dev
 
 Teacher dashboard:
     http://127.0.0.1:5000/
+    Password protected (set ATTENDANCE_PASSWORD env var; a random
+    password is printed at startup if not set).
 
 Students:
     Scan the QR displayed on the teacher dashboard.
     Phones must be on the same Wi-Fi/LAN as the teacher PC.
 
 Notes:
+- Served with Waitress in production (multi-threaded, production-grade WSGI)
 - SQLite database is created automatically as attendance.db
 - CSV export is available from the teacher dashboard
 - QR session token changes when a new session starts and expires when stopped
 - A student can only be marked once per attendance session
+- One registration per device (IP address) per session
+- The teacher dashboard is locked behind a password; student scan
+  links never expose the dashboard
+- ATTENDANCE_PASSWORD: teacher dashboard password
+- ATTENDANCE_SECRET: Flask session signing key (optional)
+- ATTENDANCE_DB: path to the SQLite database file (optional)
 """
 
+import argparse
 import csv
+import hashlib
 import io
 import os
 import secrets
@@ -33,10 +49,33 @@ import time
 from datetime import datetime
 
 import qrcode
-from flask import Flask, Response, redirect, render_template_string, request, url_for
+from flask import (
+    Flask,
+    Response,
+    redirect,
+    render_template_string,
+    request,
+    session,
+    url_for,
+)
+from waitress import serve
 
 app = Flask(__name__)
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attendance.db")
+app.secret_key = os.environ.get(
+    "ATTENDANCE_SECRET", os.urandom(32).hex()
+)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+DB_FILE = os.environ.get("ATTENDANCE_DB") or os.path.join(
+    os.getcwd(), "attendance.db"
+)
+
+# Password required to open the teacher dashboard. Override via
+# ATTENDANCE_PASSWORD. A random password is generated and printed at
+# startup if one is not configured.
+TEACHER_PASSWORD = os.environ.get(
+    "ATTENDANCE_PASSWORD"
+) or os.environ.get("TEACHER_PASSWORD") or os.urandom(9).hex()
 
 SESSION_DURATION_SECONDS = 10 * 60
 
@@ -66,10 +105,41 @@ def init_db():
             student_name TEXT NOT NULL,
             marked_at TEXT NOT NULL,
             ip_address TEXT,
-            UNIQUE(session_token, student_id)
+            UNIQUE(session_token, student_id),
+            UNIQUE(session_token, ip_address)
         )
         """
     )
+    # Migrate older databases that only enforce uniqueness per student ID.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(attendance)").fetchall()]
+    if "ip_address" in cols:
+        indexes = {i[1] for i in conn.execute("PRAGMA index_list(attendance)").fetchall()}
+        if "sqlite_autoindex_attendance_2" not in indexes:
+            # Recreate the table to add the per-device (IP) unique constraint.
+            conn.execute("ALTER TABLE attendance RENAME TO attendance_old")
+            conn.execute(
+                """
+                CREATE TABLE attendance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_token TEXT NOT NULL,
+                    student_id TEXT NOT NULL,
+                    student_name TEXT NOT NULL,
+                    marked_at TEXT NOT NULL,
+                    ip_address TEXT,
+                    UNIQUE(session_token, student_id),
+                    UNIQUE(session_token, ip_address)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO attendance
+                    (id, session_token, student_id, student_name, marked_at, ip_address)
+                SELECT id, session_token, student_id, student_name, marked_at, ip_address
+                FROM attendance_old
+                """
+            )
+            conn.execute("DROP TABLE attendance_old")
     conn.commit()
     conn.close()
 
@@ -91,6 +161,25 @@ def attendance_url():
     port = request.host.split(":")[-1] if ":" in request.host else "5000"
     token = state["token"]
     return f"http://{ip}:{port}/attend/{token}"
+
+
+def client_ip():
+    """Real client IP, honoring a single X-Forwarded-For proxy hop."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr
+
+
+def teacher_authed():
+    return session.get("teacher") is True
+
+
+def require_teacher():
+    """Redirect to the teacher login if the session is not authorized."""
+    if not teacher_authed():
+        return redirect(url_for("login"))
+    return None
 
 
 def current_state():
@@ -192,6 +281,36 @@ th, td {
 """
 
 
+LOGIN = """
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Teacher Login</title>
+    {{ style|safe }}
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <h1>Teacher Login</h1>
+        <p class="muted">Enter the teacher password to open the dashboard.</p>
+        {% if message %}
+            <div class="message">{{ message }}</div>
+        {% endif %}
+        <form method="post">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" required autofocus
+                   placeholder="Teacher password">
+            <button class="success" type="submit">Unlock Dashboard</button>
+        </form>
+    </div>
+</div>
+</body>
+</html>
+"""
+
+
 DASHBOARD = """
 <!doctype html>
 <html>
@@ -281,22 +400,23 @@ ATTEND = """
             <div class="message">{{ message }}</div>
         {% endif %}
 
-        {% if active %}
-        <p class="muted">Enter the student details below.</p>
-        <form method="post">
-            <label for="student_id">Student ID / Roll Number</label>
-            <input id="student_id" name="student_id" required autofocus
-                   placeholder="e.g. 24CS001">
-
-            <label for="student_name">Student Name</label>
-            <input id="student_name" name="student_name" required
-                   placeholder="Full name">
-
-            <button class="success" type="submit">Mark Attendance</button>
-        </form>
-        {% else %}
+        {% if not active %}
             <p>Attendance is not currently active.</p>
-            <a class="button secondary" href="/">Teacher Dashboard</a>
+        {% elif registered %}
+            <div class="message">Attendance already recorded for this session on this device.</div>
+        {% else %}
+            <p class="muted">Enter the student details below.</p>
+            <form method="post">
+                <label for="student_id">Student ID / Roll Number</label>
+                <input id="student_id" name="student_id" required autofocus
+                       placeholder="e.g. 24CS001">
+
+                <label for="student_name">Student Name</label>
+                <input id="student_name" name="student_name" required
+                       placeholder="Full name">
+
+                <button class="success" type="submit">Mark Attendance</button>
+            </form>
         {% endif %}
     </div>
 </div>
@@ -305,8 +425,41 @@ ATTEND = """
 """
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    message = ""
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        authorized = os.environ.get("ATTENDANCE_PASSWORD", os.environ.get("TEACHER_PASSWORD"))
+        # Constant-time comparison against the configured/default password.
+        given = hashlib.sha256(password.encode()).hexdigest()
+        expected = hashlib.sha256(
+            (authorized if authorized else TEACHER_PASSWORD).encode()
+        ).hexdigest()
+        if given == expected:
+            session["teacher"] = True
+            return redirect(url_for("dashboard"))
+        message = "Incorrect password. Please try again."
+
+    return render_template_string(
+        LOGIN,
+        style=BASE_STYLE,
+        message=message,
+    )
+
+
+@app.post("/logout")
+def logout():
+    session.pop("teacher", None)
+    return redirect(url_for("login"))
+
+
 @app.route("/")
 def dashboard():
+    gate = require_teacher()
+    if gate:
+        return gate
+
     today = datetime.now().strftime("%Y-%m-%d")
     conn = db()
     rows = conn.execute(
@@ -342,6 +495,10 @@ def dashboard():
 
 @app.post("/start")
 def start():
+    gate = require_teacher()
+    if gate:
+        return gate
+
     with state_lock:
         attendance_state["active"] = True
         attendance_state["token"] = secrets.token_urlsafe(12)
@@ -353,6 +510,10 @@ def start():
 
 @app.post("/stop")
 def stop():
+    gate = require_teacher()
+    if gate:
+        return gate
+
     with state_lock:
         attendance_state["active"] = False
         attendance_state["token"] = None
@@ -364,6 +525,10 @@ def stop():
 
 @app.route("/qr.png")
 def qr_image():
+    gate = require_teacher()
+    if gate:
+        return gate
+
     s = current_state()
     if not s["active"] or not s["token"]:
         return Response(status=404)
@@ -404,7 +569,19 @@ def attend(token):
             message="This attendance QR code has expired or is no longer active.",
         )
 
+    ip = client_ip()
+
     if request.method == "POST":
+        already = already_registered(token, ip)
+        if already:
+            return render_template_string(
+                ATTEND,
+                style=BASE_STYLE,
+                active=True,
+                registered=True,
+                message="This device has already marked attendance for this session.",
+            )
+
         student_id = request.form.get("student_id", "").strip()
         student_name = request.form.get("student_name", "").strip()
 
@@ -417,7 +594,6 @@ def attend(token):
             )
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
         conn = db()
         try:
@@ -430,9 +606,12 @@ def attend(token):
                 (token, student_id, student_name, now, ip),
             )
             conn.commit()
-            message = f"Attendance recorded successfully for {student_name}."
+            message = "Attendance recorded successfully."
         except sqlite3.IntegrityError:
-            message = f"Attendance already recorded for Student ID {student_id}."
+            if already_registered(token, ip):
+                message = "This device has already marked attendance for this session."
+            else:
+                message = f"Attendance already recorded for Student ID {student_id}."
         finally:
             conn.close()
 
@@ -440,15 +619,34 @@ def attend(token):
             ATTEND,
             style=BASE_STYLE,
             active=True,
+            registered=True,
             message=message,
         )
 
+    registered = already_registered(token, ip)
     return render_template_string(
         ATTEND,
         style=BASE_STYLE,
         active=True,
-        message="",
+        registered=registered,
+        message=(
+            "You have already marked attendance for this session on this device."
+            if registered
+            else ""
+        ),
     )
+
+
+def already_registered(token, ip):
+    if not token or not ip:
+        return False
+    conn = db()
+    row = conn.execute(
+        "SELECT 1 FROM attendance WHERE session_token = ? AND ip_address = ? LIMIT 1",
+        (token, ip),
+    ).fetchone()
+    conn.close()
+    return row is not None
 
 
 def session_count(token):
@@ -466,6 +664,10 @@ def session_count(token):
 
 @app.route("/export.csv")
 def export_csv():
+    gate = require_teacher()
+    if gate:
+        return gate
+
     today = datetime.now().strftime("%Y-%m-%d")
 
     conn = db()
@@ -520,7 +722,27 @@ def session_expiry_worker():
                 attendance_state["expires_at"] = None
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="QR Attendance System")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="host/interface to bind (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=5000, help="port to bind (default: 5000)"
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="run the Flask development server instead of Waitress",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="Waitress thread count (default: 4)",
+    )
+    args = parser.parse_args(argv)
+
     init_db()
 
     threading.Thread(
@@ -532,12 +754,28 @@ if __name__ == "__main__":
     print("=" * 60)
     print("QR ATTENDANCE SYSTEM")
     print("=" * 60)
-    print(f"Teacher dashboard: http://127.0.0.1:5000/")
-    print(f"LAN dashboard:     http://{local_ip()}:5000/")
+    print(f"Teacher dashboard: http://127.0.0.1:{args.port}/")
+    print(f"LAN dashboard:     http://{local_ip()}:{args.port}/")
+    print()
+    print("The teacher dashboard is password protected.")
+    if not os.environ.get("ATTENDANCE_PASSWORD") and not os.environ.get(
+        "TEACHER_PASSWORD"
+    ):
+        print(f"Teacher password (auto-generated): {TEACHER_PASSWORD}")
+        print("Set ATTENDANCE_PASSWORD to use your own.")
+    else:
+        print("Use your configured ATTENDANCE_PASSWORD to log in.")
     print()
     print("Students must be connected to the same Wi-Fi/LAN.")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     print()
 
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    if args.dev:
+        app.run(host=args.host, port=args.port, debug=False, threaded=True)
+    else:
+        serve(app, host=args.host, port=args.port, threads=args.threads)
+
+
+if __name__ == "__main__":
+    main()

@@ -21,10 +21,13 @@ database.
 - **Password-protected teacher dashboard** — student scan links never expose it
 - **One registration per device** (IP address) per session — rescanning with a
   different ID cannot double-register
+- **Subjects** — add/delete subjects and assign each session to one (e.g.
+  Mathematics, Physics); run multiple sessions for the same subject per day
 - Attendance is written to a local SQLite database
-- CSV export of the day's attendance
-- **Monthly attendance report** — pick a month to see per-student distinct days
-  attended, with CSV export
+- CSV export of the day's attendance (with a `Subject` column)
+- **Monthly attendance report** — pick a month to see a student × subject matrix
+  of sessions attended, or drill into a single subject for session dates and
+  distinct days, with CSV export
 - Sessions auto-expire after 10 minutes
 
 ## Install
@@ -43,13 +46,13 @@ scoop install attendance
 
 ### Windows / Linux / macOS (download)
 
-Download `attendance-v0.2.0-win64.zip` (Windows), or the
-`attendance-v0.2.0-linux-x86_64.tar.gz` / `attendance-v0.2.0-macos-arm64.tar.gz` /
-`attendance-v0.2.0-macos-x86_64.tar.gz` archives for Unix, from the
+Download `attendance-v0.3.0-win64.zip` (Windows), or the
+`attendance-v0.3.0-linux-x86_64.tar.gz` / `attendance-v0.3.0-macos-arm64.tar.gz` /
+`attendance-v0.3.0-macos-x86_64.tar.gz` archives for Unix, from the
 [releases page](https://github.com/chaito10/Attendance/releases/latest). On Unix:
 
 ```bash
-tar xzf attendance-v0.2.0-linux-x86_64.tar.gz
+tar xzf attendance-v0.3.0-linux-x86_64.tar.gz
 chmod +x attendance
 ./attendance
 ```
@@ -94,14 +97,16 @@ Optional flags:
 ## How it works
 
 1. The teacher opens the dashboard (`http://<pc-ip>:5000/`) and logs in with the
-   teacher password.
-2. Clicking **Start Attendance** generates a session token and a QR code whose URL
-   points to `http://<pc-ip>:5000/attend/<token>`.
+   teacher password. They can add subjects under the **Subjects** card.
+2. Clicking **Start Attendance** (optionally picking a subject first) generates a
+   session token and a QR code whose URL points to
+   `http://<pc-ip>:5000/attend/<token>`.
 3. Students scan the QR with their phone and submit their ID and name. The entry is
    written to the database.
 4. Clicking **Stop Attendance** invalidates the session. Sessions also auto-expire
-   after 10 minutes.
-5. The teacher can export the day's attendance as CSV from the dashboard.
+   after 10 minutes. You can start another session for the same subject the same day.
+5. The teacher can export the day's attendance as CSV from the dashboard, and view
+   the monthly per-subject breakdown via **Monthly Report**.
 
 The QR is encoded with the PC's LAN IP, so students' phones must be on the same
 network. The teacher may also share the printed URL directly.
@@ -122,8 +127,10 @@ ATTENDANCE_PASSWORD="hunter2" ATTENDANCE_DB="/srv/attendance/attendance.db" uv r
 
 ## Security notes
 
-- The teacher dashboard (`/`, `/start`, `/stop`, `/export.csv`, `/qr.png`) requires
-  a valid teacher login session. Unauthenticated visits are redirected to `/login`.
+- The teacher dashboard (`/`, `/start`, `/stop`, `/subjects/add`,
+  `/subjects/<id>/delete`, `/monthly`, `/monthly.csv`, `/export.csv`, `/qr.png`)
+  requires a valid teacher login session. Unauthenticated visits are redirected
+  to `/login`.
 - The student route (`/attend/<token>`) requires no login, but is only usable while
   a session is active and the token matches.
 - One attendance entry is allowed per device (IP address) per session, enforced by a

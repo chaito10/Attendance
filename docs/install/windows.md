@@ -30,7 +30,7 @@ Scoop keeps the app up to date with `scoop update && scoop update attendance`.
 ## Option B - Manual (zip)
 
 1. Download
-   [`attendance-v0.2.0-win64.zip`](https://github.com/chaito10/Attendance/releases/download/v0.2.0/attendance-v0.2.0-win64.zip)
+   [`attendance-v0.3.0-win64.zip`](https://github.com/chaito10/Attendance/releases/download/v0.3.0/attendance-v0.3.0-win64.zip)
    from the [releases page](https://github.com/chaito10/Attendance/releases/latest).
 2. Extract the archive (right-click -> **Extract All**).
 3. Double-click `attendance.exe`, or run it from a terminal:
@@ -66,12 +66,12 @@ box. If you missed it:
 
 ## Verifying the download
 
-The official SHA-256 of `attendance-v0.2.0-win64.zip` is published with each
+The official SHA-256 of `attendance-v0.3.0-win64.zip` is published with each
 [release](https://github.com/chaito10/Attendance/releases/latest). Verify it
 for yourself:
 
 ```powershell
-Get-FileHash .\attendance-v0.2.0-win64.zip -Algorithm SHA256
+Get-FileHash .\attendance-v0.3.0-win64.zip -Algorithm SHA256
 ```
 
 [Next: Using the app](../usage.md)

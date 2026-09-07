@@ -44,10 +44,27 @@ Responses:
 Requires a teacher session. Starts a new attendance session with a fresh token
 and a 10-minute expiry, then `302` redirects to `/`.
 
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `subject_id` | int | no | The subject this session belongs to. Defaults to `General`. |
+
 ### `POST /stop`
 
 Requires a teacher session. Ends the current session and invalidates its token,
 then `302` redirects to `/`.
+
+### `POST /subjects/add`
+
+Requires a teacher session. Adds a subject, then `302` redirects to `/`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Subject name (must be unique). |
+
+### `POST /subjects/<subject_id>/delete`
+
+Requires a teacher session. Deletes a subject, then `302` redirects to `/`.
+Rejected while the subject still has attendance records.
 
 ### `GET /qr.png`
 
@@ -99,7 +116,7 @@ Requires a teacher session. Downloads the day's attendance as a CSV attachment:
 `attendance_YYYY-MM-DD.csv`
 
 ```text
-Student ID,Student Name,Marked At,Session Token,IP Address
+Student ID,Student Name,Subject,Marked At,Session Token,IP Address
 ```
 
 ### `GET /monthly`
@@ -111,20 +128,23 @@ Query params:
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `month` | string | current month | The month to report, `YYYY-MM`. |
-
-The report lists each student with the number of **distinct days attended** in
-that month (multiple sessions on the same calendar day count once) and the
-dates they attended.
+| `subject` | int | none | A subject ID. When omitted, renders the student × subject matrix (each cell = sessions attended that month). When set, renders the per-student breakdown for that subject: sessions attended, distinct days, and session dates. |
 
 ### `GET /monthly.csv`
 
 Requires a teacher session. Downloads the monthly compilation as a CSV
-attachment:
+attachment, matching the current report view:
 
-`attendance_YYYY-MM.csv`
+`attendance_YYYY-MM.csv` (matrix, when no subject is selected)
 
 ```text
-Student ID,Student Name,Days Attended,Distinct Dates
+Student ID,Student Name,Mathematics,Physics,Total
+```
+
+`attendance_<subject>_YYYY-MM.csv` (single subject)
+
+```text
+Student ID,Student Name,Sessions Attended,Distinct Days,Session Dates
 ```
 
 ## Authentication

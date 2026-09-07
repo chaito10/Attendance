@@ -15,8 +15,11 @@ No cloud, no accounts, no student data leaving the classroom network.
 - **One registration per device** per session (an IP can't mark twice)
 - **One registration per student** per session (duplicate IDs are rejected)
 - **Sessions expire automatically** after 10 minutes
-- **CSV export** of the day's attendance
-- **Monthly report** - per-student distinct days attended, with CSV export
+- **Subjects** - add/delete subjects and assign each session to one; run
+  multiple sessions for the same subject per day
+- **CSV export** of the day's attendance (includes the subject)
+- **Monthly report** - a student × subject matrix of sessions attended, with a
+  per-subject drill-down (session dates + distinct days) and CSV export
 - **Served by Waitress** in production (multi-threaded, production-grade WSGI)
 - **Cross-platform** - Windows, Linux, and macOS binaries
 
@@ -24,13 +27,13 @@ No cloud, no accounts, no student data leaving the classroom network.
 
 | Platform | Binary | Install |
 |----------|--------|---------|
-| Windows | `attendance-v0.2.0-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
-| Linux x86_64 | `attendance-v0.2.0-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
-| macOS arm64 | `attendance-v0.2.0-macos-arm64.tar.gz` | [Manual](install/macos.md) |
-| macOS x86_64 | `attendance-v0.2.0-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
+| Windows | `attendance-v0.3.0-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
+| Linux x86_64 | `attendance-v0.3.0-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
+| macOS arm64 | `attendance-v0.3.0-macos-arm64.tar.gz` | [Manual](install/macos.md) |
+| macOS x86_64 | `attendance-v0.3.0-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
 | Any (from source) | Python with uv | [Development](development.md) |
 
-> **Newest release:** [v0.2.0](https://github.com/chaito10/Attendance/releases/latest)
+> **Newest release:** [v0.3.0](https://github.com/chaito10/Attendance/releases/latest)
 > - all binaries are attached to the release page.
 
 ## Quick start
@@ -40,7 +43,8 @@ No cloud, no accounts, no student data leaving the classroom network.
 3. The console shows a **teacher password** (auto-generated on first run unless you
    set `ATTENDANCE_PASSWORD`).
 4. Open `http://127.0.0.1:5000/` and log in with that password.
-5. Click **Start Attendance**, then **Stop** when students are done.
+5. (Optional) Add a subject under the **Subjects** card, then click
+   **Start Attendance** and **Stop** when students are done.
 6. Connect a phone to the **same Wi-Fi/LAN**, scan the QR, and enter student details.
 
 Hold down **Ctrl+C** to stop the server.

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0] - 2026-09-07
+
+### Added
+
+- **Subjects** — teachers can add/delete subjects (e.g. Mathematics, Physics)
+  and assign each attendance session to a subject
+- **Multiple sessions per subject per day** — start and stop a session, then
+  start another session for the same subject the same day
+- **Per-subject monthly report** — the monthly report now sums each student's
+  attendance per subject (total sessions), with a student × subject matrix and
+  per-subject drill-down showing session dates and distinct days
+- Subject-aware CSV exports (`/monthly.csv` in matrix or per-subject form), and
+  the daily export (`/export.csv`) now includes a `Subject` column
+
+### Changed
+
+- Monthly report view: switched from "distinct days across all sessions" to a
+  per-subject breakdown; legacy attendance rows are backfilled to a `General`
+  subject during migration
+- Version bumped to 0.3.0
+
 ## [v0.2.0] - 2026-09-07
 
 ### Added

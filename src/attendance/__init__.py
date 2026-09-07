@@ -26,6 +26,8 @@ Notes:
 - Served with Waitress in production (multi-threaded, production-grade WSGI)
 - SQLite database is created automatically as attendance.db
 - CSV export is available from the teacher dashboard
+- Subjects: each session is tied to a subject; multiple sessions per subject
+  per day are allowed, and the monthly report sums attendance per subject
 - QR session token changes when a new session starts and expires when stopped
 - A student can only be marked once per attendance session
 - One registration per device (IP address) per session
@@ -83,6 +85,7 @@ state_lock = threading.Lock()
 attendance_state = {
     "active": False,
     "token": None,
+    "subject_id": None,
     "started_at": None,
     "expires_at": None,
 }
@@ -98,9 +101,30 @@ def init_db():
     conn = db()
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS subjects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
+            subject_id INTEGER NOT NULL REFERENCES subjects(id),
+            started_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            ended_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_token TEXT NOT NULL,
+            subject_id INTEGER REFERENCES subjects(id),
             student_id TEXT NOT NULL,
             student_name TEXT NOT NULL,
             marked_at TEXT NOT NULL,
@@ -140,8 +164,58 @@ def init_db():
                 """
             )
             conn.execute("DROP TABLE attendance_old")
+
+    # Add the subject column if missing (records created before subjects
+    # existed). Existing rows are assigned to the "General" subject below.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(attendance)").fetchall()]
+    if "subject_id" not in cols:
+        conn.execute(
+            "ALTER TABLE attendance ADD COLUMN subject_id INTEGER REFERENCES subjects(id)"
+        )
+
+    # Backfill legacy records (no subject yet) into the "General" subject.
+    legacy = conn.execute(
+        "SELECT COUNT(*) AS c FROM attendance WHERE subject_id IS NULL"
+    ).fetchone()["c"]
+    if legacy:
+        conn.execute("INSERT OR IGNORE INTO subjects (name) VALUES ('General')")
+        general_id = conn.execute(
+            "SELECT id FROM subjects WHERE name = 'General'"
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE attendance SET subject_id = ? WHERE subject_id IS NULL",
+            (general_id,),
+        )
+
     conn.commit()
     conn.close()
+
+
+def get_subjects():
+    """All subjects as a list of dicts, ordered by name."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT id, name FROM subjects ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+
+def subject_today_sessions():
+    """Count of sessions started today, keyed by subject_id."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT subject_id, COUNT(*) AS c
+        FROM sessions
+        WHERE started_at LIKE ?
+        GROUP BY subject_id
+        """,
+        (today + "%",),
+    ).fetchall()
+    conn.close()
+    return {r["subject_id"]: r["c"] for r in rows}
 
 
 def local_ip():
@@ -227,13 +301,14 @@ button, .button {
 button.danger, .danger { background: #b42318; }
 button.success, .success { background: #147a4b; }
 button.secondary, .secondary { background: #667085; }
-input {
+input, select {
     width: 100%;
     padding: 13px;
     border: 1px solid #d0d5dd;
     border-radius: 9px;
     margin: 7px 0 15px;
     font-size: 16px;
+    background: white;
 }
 label { font-weight: 600; }
 .status {
@@ -326,7 +401,10 @@ DASHBOARD = """
         <h1>QR Attendance</h1>
         {% if active %}
             <span class="status active">● Attendance ACTIVE</span>
-            <p class="muted">Started: {{ started }}</p>
+            <p class="muted">
+                Subject: <strong>{{ active_subject['name'] if active_subject else '' }}</strong>
+                &nbsp;|&nbsp; Started: {{ started }}
+            </p>
             <p class="big">Students scanned: {{ count }}</p>
 
             <div class="center">
@@ -340,11 +418,60 @@ DASHBOARD = """
             </form>
         {% else %}
             <span class="status inactive">● Attendance NOT ACTIVE</span>
-            <p class="muted">Start a session to generate a new QR code.</p>
-            <form method="post" action="{{ url_for('start') }}">
-                <button class="success" type="submit">Start Attendance</button>
-            </form>
+            {% if subjects %}
+                <p class="muted">Choose a subject to start a session and generate a new QR code.</p>
+                <form method="post" action="{{ url_for('start') }}">
+                    <label for="subject_id">Subject</label>
+                    <select id="subject_id" name="subject_id" required>
+                        {% for sub in subjects %}
+                            <option value="{{ sub['id'] }}">{{ sub['name'] }}</option>
+                        {% endfor %}
+                    </select>
+                    <button class="success" type="submit">Start Attendance</button>
+                </form>
+            {% else %}
+                <p class="muted">Add a subject below to start an attendance session.</p>
+            {% endif %}
         {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Subjects</h2>
+        {% if subjects %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Subject</th>
+                    <th>Sessions Today</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for sub in subjects %}
+                <tr>
+                    <td>{{ sub['name'] }}</td>
+                    <td>{{ sub['today_sessions'] }}</td>
+                    <td>
+                        {% if active and active_subject and active_subject['id'] == sub['id'] %}
+                            <span class="status active">Running</span>
+                        {% else %}
+                            <form method="post" action="{{ url_for('subject_delete', subject_id=sub['id']) }}" style="display:inline">
+                                <button class="secondary" type="submit">Delete</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <p class="muted">No subjects yet.</p>
+        {% endif %}
+        <form method="post" action="{{ url_for('subject_add') }}">
+            <label for="subject_name">Add Subject</label>
+            <input id="subject_name" name="name" required placeholder="e.g. Mathematics">
+            <button class="success" type="submit">Add Subject</button>
+        </form>
     </div>
 
     <div class="card">
@@ -361,6 +488,7 @@ DASHBOARD = """
                     <th>#</th>
                     <th>Student ID</th>
                     <th>Name</th>
+                    <th>Subject</th>
                     <th>Time</th>
                 </tr>
             </thead>
@@ -370,6 +498,7 @@ DASHBOARD = """
                     <td>{{ loop.index }}</td>
                     <td>{{ row['student_id'] }}</td>
                     <td>{{ row['student_name'] }}</td>
+                    <td>{{ row['subject_name'] }}</td>
                     <td>{{ row['marked_at'] }}</td>
                 </tr>
             {% endfor %}
@@ -402,6 +531,13 @@ MONTHLY = """
         <form method="get" action="{{ url_for('monthly') }}">
             <label for="month">Month</label>
             <input id="month" name="month" type="month" value="{{ month }}" required>
+            <label for="subject">Subject</label>
+            <select id="subject" name="subject">
+                <option value="" {% if not selected_subject %}selected{% endif %}>All subjects</option>
+                {% for sub in subjects %}
+                    <option value="{{ sub['id'] }}" {% if selected_subject == sub['id'] %}selected{% endif %}>{{ sub['name'] }}</option>
+                {% endfor %}
+            </select>
             <button class="success" type="submit">View Report</button>
         </form>
     </div>
@@ -409,34 +545,70 @@ MONTHLY = """
     <div class="card">
         <div class="actions">
             <h2 style="flex:1">{{ month_label }}</h2>
-            <a class="button secondary" href="{{ url_for('monthly_csv', month=month) }}">Export CSV</a>
+            <a class="button secondary" href="{{ url_for('monthly_csv', month=month, subject=selected_subject) }}">Export CSV</a>
         </div>
-        <p class="muted">{{ days_in_month }} days in this month &mdash; counting distinct days attended per student.</p>
-        {% if rows %}
-        <table>
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Student ID</th>
-                    <th>Name</th>
-                    <th>Days Attended</th>
-                    <th>Distinct Dates</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for row in rows %}
-                <tr>
-                    <td>{{ loop.index }}</td>
-                    <td>{{ row['student_id'] }}</td>
-                    <td>{{ row['student_name'] }}</td>
-                    <td>{{ row['days_attended'] }}</td>
-                    <td class="muted">{{ row['dates'] }}</td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+        {% if mode == 'all' %}
+            <p class="muted">Sessions attended per student per subject &mdash; each session counts once.</p>
+            {% if matrix %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Student ID</th>
+                        <th>Name</th>
+                        {% for sub in subjects %}
+                            <th>{{ sub['name'] }}</th>
+                        {% endfor %}
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for r in matrix %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ r['student_id'] }}</td>
+                        <td>{{ r['student_name'] }}</td>
+                        {% for sub in subjects %}
+                            <td>{{ r['counts'].get(sub['id'], 0) }}</td>
+                        {% endfor %}
+                        <td><strong>{{ r['total'] }}</strong></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+                <p class="muted">No attendance recorded in this month.</p>
+            {% endif %}
         {% else %}
-            <p class="muted">No attendance recorded in this month.</p>
+            <p class="muted">{{ subject_name }} &mdash; total sessions attended per student (multiple sessions on the same day count separately).</p>
+            {% if rows %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Student ID</th>
+                        <th>Name</th>
+                        <th>Sessions</th>
+                        <th>Distinct Days</th>
+                        <th>Session Dates (per-day count)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for row in rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ row['student_id'] }}</td>
+                        <td>{{ row['student_name'] }}</td>
+                        <td>{{ row['sessions'] }}</td>
+                        <td>{{ row['distinct_days'] }}</td>
+                        <td class="muted">{{ row['dates'] }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+                <p class="muted">No attendance recorded for {{ subject_name }} in this month.</p>
+            {% endif %}
         {% endif %}
     </div>
 </div>
@@ -466,6 +638,9 @@ ATTEND = """
         {% elif registered %}
             <div class="message">Attendance already recorded for this session on this device.</div>
         {% else %}
+            {% if subject_name %}
+                <p class="muted">Subject: <strong>{{ subject_name }}</strong></p>
+            {% endif %}
             <p class="muted">Enter the student details below.</p>
             <form method="post">
                 <label for="student_id">Student ID / Roll Number</label>
@@ -525,16 +700,30 @@ def dashboard():
     conn = db()
     rows = conn.execute(
         """
-        SELECT student_id, student_name, marked_at
-        FROM attendance
-        WHERE marked_at LIKE ?
-        ORDER BY id DESC
+        SELECT a.student_id, a.student_name, a.marked_at,
+               COALESCE(s.name, 'No subject') AS subject_name
+        FROM attendance a
+        LEFT JOIN subjects s ON s.id = a.subject_id
+        WHERE a.marked_at LIKE ?
+        ORDER BY a.id DESC
         """,
         (today + "%",),
     ).fetchall()
     conn.close()
 
+    subjects = get_subjects()
+    today_sessions = subject_today_sessions()
+    for sub in subjects:
+        sub["today_sessions"] = today_sessions.get(sub["id"], 0)
+
     s = current_state()
+    active_subject = None
+    if s["active"] and s["subject_id"]:
+        for sub in subjects:
+            if sub["id"] == s["subject_id"]:
+                active_subject = sub
+                break
+
     return render_template_string(
         DASHBOARD,
         style=BASE_STYLE,
@@ -546,6 +735,8 @@ def dashboard():
         ),
         count=session_count(s["token"]) if s["token"] else 0,
         rows=rows,
+        subjects=subjects,
+        active_subject=active_subject,
         attend_url=(
             f"http://{local_ip()}:{request.host.split(':')[-1]}/attend/{s['token']}"
             if s["token"]
@@ -560,11 +751,39 @@ def start():
     if gate:
         return gate
 
+    subject_id = request.form.get("subject_id", "").strip()
+    if not subject_id:
+        return redirect(url_for("dashboard"))
+
+    conn = db()
+    subject = conn.execute(
+        "SELECT id FROM subjects WHERE id = ?", (subject_id,)
+    ).fetchone()
+    if not subject:
+        conn.close()
+        return redirect(url_for("dashboard"))
+
+    token = secrets.token_urlsafe(12)
+    started = time.time()
+    expires = started + SESSION_DURATION_SECONDS
+    started_str = datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S")
+    expires_str = datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """
+        INSERT INTO sessions (token, subject_id, started_at, expires_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (token, subject_id, started_str, expires_str),
+    )
+    conn.commit()
+    conn.close()
+
     with state_lock:
         attendance_state["active"] = True
-        attendance_state["token"] = secrets.token_urlsafe(12)
-        attendance_state["started_at"] = time.time()
-        attendance_state["expires_at"] = time.time() + SESSION_DURATION_SECONDS
+        attendance_state["token"] = token
+        attendance_state["subject_id"] = int(subject_id)
+        attendance_state["started_at"] = started
+        attendance_state["expires_at"] = expires
 
     return redirect(url_for("dashboard"))
 
@@ -576,10 +795,61 @@ def stop():
         return gate
 
     with state_lock:
+        token = attendance_state["token"]
+        ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         attendance_state["active"] = False
         attendance_state["token"] = None
+        attendance_state["subject_id"] = None
         attendance_state["started_at"] = None
         attendance_state["expires_at"] = None
+
+    if token:
+        conn = db()
+        conn.execute(
+            "UPDATE sessions SET ended_at = ? WHERE token = ? AND ended_at IS NULL",
+            (ended, token),
+        )
+        conn.commit()
+        conn.close()
+
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/subjects/add")
+def subject_add():
+    gate = require_teacher()
+    if gate:
+        return gate
+
+    name = request.form.get("name", "").strip()
+    if name:
+        conn = db()
+        try:
+            conn.execute("INSERT INTO subjects (name) VALUES (?)", (name,))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass
+        conn.close()
+
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/subjects/<int:subject_id>/delete")
+def subject_delete(subject_id):
+    gate = require_teacher()
+    if gate:
+        return gate
+
+    conn = db()
+    used = conn.execute(
+        "SELECT COUNT(*) AS c FROM attendance WHERE subject_id = ?",
+        (subject_id,),
+    ).fetchone()["c"]
+    if not used:
+        conn.execute("DELETE FROM sessions WHERE subject_id = ?", (subject_id,))
+        conn.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+        conn.commit()
+    conn.close()
 
     return redirect(url_for("dashboard"))
 
@@ -627,10 +897,20 @@ def attend(token):
             ATTEND,
             style=BASE_STYLE,
             active=False,
+            subject_name="",
             message="This attendance QR code has expired or is no longer active.",
         )
 
     ip = client_ip()
+
+    subject_name = ""
+    if s["subject_id"]:
+        conn = db()
+        row = conn.execute(
+            "SELECT name FROM subjects WHERE id = ?", (s["subject_id"],)
+        ).fetchone()
+        conn.close()
+        subject_name = row["name"] if row else ""
 
     if request.method == "POST":
         already = already_registered(token, ip)
@@ -639,6 +919,7 @@ def attend(token):
                 ATTEND,
                 style=BASE_STYLE,
                 active=True,
+                subject_name=subject_name,
                 registered=True,
                 message="This device has already marked attendance for this session.",
             )
@@ -651,6 +932,7 @@ def attend(token):
                 ATTEND,
                 style=BASE_STYLE,
                 active=True,
+                subject_name=subject_name,
                 message="Please enter both Student ID and Student Name.",
             )
 
@@ -661,10 +943,10 @@ def attend(token):
             conn.execute(
                 """
                 INSERT INTO attendance
-                (session_token, student_id, student_name, marked_at, ip_address)
-                VALUES (?, ?, ?, ?, ?)
+                (session_token, subject_id, student_id, student_name, marked_at, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (token, student_id, student_name, now, ip),
+                (token, s["subject_id"], student_id, student_name, now, ip),
             )
             conn.commit()
             message = "Attendance recorded successfully."
@@ -680,6 +962,7 @@ def attend(token):
             ATTEND,
             style=BASE_STYLE,
             active=True,
+            subject_name=subject_name,
             registered=True,
             message=message,
         )
@@ -689,6 +972,7 @@ def attend(token):
         ATTEND,
         style=BASE_STYLE,
         active=True,
+        subject_name=subject_name,
         registered=registered,
         message=(
             "You have already marked attendance for this session on this device."
@@ -723,13 +1007,14 @@ def session_count(token):
     return row["c"]
 
 
-def monthly_summary(month_str):
-    """Compile per-student distinct-day counts for a month (YYYY-MM)."""
+def subject_attendance_matrix(month_str):
+    """Per-student session counts across all subjects for a month (YYYY-MM)."""
     month_prefix = month_str + "%"
+    subjects = get_subjects()
     conn = db()
     rows = conn.execute(
         """
-        SELECT student_id, student_name, marked_at
+        SELECT student_id, student_name, subject_id
         FROM attendance
         WHERE marked_at LIKE ?
         ORDER BY student_id, marked_at
@@ -741,11 +1026,55 @@ def monthly_summary(month_str):
     by_student = {}
     for row in rows:
         sid = row["student_id"]
-        date = row["marked_at"][:10]
         entry = by_student.setdefault(
-            sid, {"student_id": sid, "student_name": row["student_name"], "dates": set()}
+            sid,
+            {
+                "student_id": sid,
+                "student_name": row["student_name"],
+                "counts": {},
+            },
         )
-        entry["dates"].add(date)
+        subj = row["subject_id"]
+        entry["counts"][subj] = entry["counts"].get(subj, 0) + 1
+
+    matrix = []
+    for entry in by_student.values():
+        entry["total"] = sum(entry["counts"].values())
+        matrix.append(entry)
+    matrix.sort(key=lambda r: (r["student_id"].lower(), r["student_name"].lower()))
+    return matrix, subjects
+
+
+def subject_attendance_list(month_str, subject_id):
+    """Total sessions attended per student for one subject in a month."""
+    month_prefix = month_str + "%"
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT student_id, student_name, marked_at
+        FROM attendance
+        WHERE subject_id = ? AND marked_at LIKE ?
+        ORDER BY student_id, marked_at
+        """,
+        (subject_id, month_prefix),
+    ).fetchall()
+    conn.close()
+
+    by_student = {}
+    for row in rows:
+        sid = row["student_id"]
+        day = row["marked_at"][:10]
+        entry = by_student.setdefault(
+            sid,
+            {
+                "student_id": sid,
+                "student_name": row["student_name"],
+                "sessions": 0,
+                "days": {},
+            },
+        )
+        entry["sessions"] += 1
+        entry["days"][day] = entry["days"].get(day, 0) + 1
 
     summary = []
     for entry in by_student.values():
@@ -753,12 +1082,25 @@ def monthly_summary(month_str):
             {
                 "student_id": entry["student_id"],
                 "student_name": entry["student_name"],
-                "days_attended": len(entry["dates"]),
-                "dates": ", ".join(sorted(entry["dates"])),
+                "sessions": entry["sessions"],
+                "distinct_days": len(entry["days"]),
+                "dates": ", ".join(
+                    f"{d} ({n})" for d, n in sorted(entry["days"].items())
+                ),
             }
         )
     summary.sort(key=lambda r: (r["student_id"].lower(), r["student_name"].lower()))
     return summary
+
+
+def _parse_month(raw):
+    if not raw:
+        return datetime.now().strftime("%Y-%m")
+    try:
+        datetime.strptime(raw, "%Y-%m")
+        return raw
+    except ValueError:
+        return datetime.now().strftime("%Y-%m")
 
 
 @app.route("/monthly")
@@ -767,25 +1109,50 @@ def monthly():
     if gate:
         return gate
 
-    month = request.args.get("month", "").strip()
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
-    try:
-        dt = datetime.strptime(month, "%Y-%m")
-    except ValueError:
-        month = datetime.now().strftime("%Y-%m")
-        dt = datetime.strptime(month, "%Y-%m")
+    month = _parse_month(request.args.get("month", "").strip())
+    dt = datetime.strptime(month, "%Y-%m")
+    subjects = get_subjects()
+
+    selected_subject = None
+    subject_param = request.args.get("subject", "").strip()
+    for sub in subjects:
+        if str(sub["id"]) == subject_param:
+            selected_subject = sub
+            break
 
     import calendar as _calendar
 
     total_days = _calendar.monthrange(dt.year, dt.month)[1]
+
+    if selected_subject:
+        rows = subject_attendance_list(month, selected_subject["id"])
+        return render_template_string(
+            MONTHLY,
+            style=BASE_STYLE,
+            month=month,
+            month_label=dt.strftime("%B %Y"),
+            days_in_month=total_days,
+            subjects=subjects,
+            selected_subject=selected_subject["id"],
+            subject_name=selected_subject["name"],
+            mode="subject",
+            rows=rows,
+            matrix=[],
+        )
+
+    matrix, _subjects = subject_attendance_matrix(month)
     return render_template_string(
         MONTHLY,
         style=BASE_STYLE,
         month=month,
         month_label=dt.strftime("%B %Y"),
         days_in_month=total_days,
-        rows=monthly_summary(month),
+        subjects=subjects,
+        selected_subject=None,
+        subject_name="",
+        mode="all",
+        rows=[],
+        matrix=matrix,
     )
 
 
@@ -795,31 +1162,53 @@ def monthly_csv():
     if gate:
         return gate
 
-    month = request.args.get("month", "").strip()
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
-    try:
-        dt = datetime.strptime(month, "%Y-%m")
-    except ValueError:
-        month = datetime.now().strftime("%Y-%m")
-        dt = datetime.strptime(month, "%Y-%m")
+    month = _parse_month(request.args.get("month", "").strip())
+    subjects = get_subjects()
 
-    summary = monthly_summary(month)
+    selected_subject = None
+    subject_param = request.args.get("subject", "").strip()
+    for sub in subjects:
+        if str(sub["id"]) == subject_param:
+            selected_subject = sub
+            break
+
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Student ID", "Student Name", "Days Attended", "Distinct Dates"])
 
-    for row in summary:
+    if selected_subject:
+        summary = subject_attendance_list(month, selected_subject["id"])
         writer.writerow(
-            [
-                row["student_id"],
-                row["student_name"],
-                row["days_attended"],
-                row["dates"],
-            ]
+            ["Student ID", "Student Name", "Sessions Attended", "Distinct Days", "Session Dates"]
         )
+        for row in summary:
+            writer.writerow(
+                [
+                    row["student_id"],
+                    row["student_name"],
+                    row["sessions"],
+                    row["distinct_days"],
+                    row["dates"],
+                ]
+            )
+        safe_name = "".join(
+            ch if ch.isalnum() or ch in "-_" else "_" for ch in selected_subject["name"]
+        )
+        filename = f"attendance_{safe_name}_{month}.csv"
+    else:
+        matrix, subjects_used = subject_attendance_matrix(month)
+        writer.writerow(
+            ["Student ID", "Student Name"]
+            + [s["name"] for s in subjects_used]
+            + ["Total"]
+        )
+        for row in matrix:
+            writer.writerow(
+                [row["student_id"], row["student_name"]]
+                + [row["counts"].get(s["id"], 0) for s in subjects_used]
+                + [row["total"]]
+            )
+        filename = f"attendance_{month}.csv"
 
-    filename = f"attendance_{month}.csv"
     return Response(
         output.getvalue(),
         mimetype="text/csv",
@@ -838,10 +1227,12 @@ def export_csv():
     conn = db()
     rows = conn.execute(
         """
-        SELECT student_id, student_name, marked_at, session_token, ip_address
-        FROM attendance
-        WHERE marked_at LIKE ?
-        ORDER BY marked_at
+        SELECT a.student_id, a.student_name, a.marked_at, a.session_token, a.ip_address,
+               COALESCE(s.name, 'No subject') AS subject_name
+        FROM attendance a
+        LEFT JOIN subjects s ON s.id = a.subject_id
+        WHERE a.marked_at LIKE ?
+        ORDER BY a.marked_at
         """,
         (today + "%",),
     ).fetchall()
@@ -850,7 +1241,7 @@ def export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
-        ["Student ID", "Student Name", "Marked At", "Session Token", "IP Address"]
+        ["Student ID", "Student Name", "Subject", "Marked At", "Session Token", "IP Address"]
     )
 
     for row in rows:
@@ -858,6 +1249,7 @@ def export_csv():
             [
                 row["student_id"],
                 row["student_name"],
+                row["subject_name"],
                 row["marked_at"],
                 row["session_token"],
                 row["ip_address"],
@@ -881,10 +1273,21 @@ def session_expiry_worker():
                 and attendance_state["expires_at"]
                 and time.time() >= attendance_state["expires_at"]
             ):
+                token = attendance_state["token"]
                 attendance_state["active"] = False
                 attendance_state["token"] = None
+                attendance_state["subject_id"] = None
                 attendance_state["started_at"] = None
                 attendance_state["expires_at"] = None
+                if token:
+                    ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    conn = db()
+                    conn.execute(
+                        "UPDATE sessions SET ended_at = ? WHERE token = ? AND ended_at IS NULL",
+                        (ended, token),
+                    )
+                    conn.commit()
+                    conn.close()
 
 
 def main(argv=None):

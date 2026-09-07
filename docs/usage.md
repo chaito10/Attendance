@@ -42,19 +42,34 @@ Press **Ctrl+C** to stop.
    - The current session status (**active** / **not active**)
    - The live QR code and the scan URL
    - The number of students scanned so far
-   - **Today's attendance** table with an **Export CSV** button
+   - A **Subjects** card to add/delete subjects
+   - **Today's attendance** table (with the subject for each entry) and an
+     **Export CSV** button
    - A **Monthly Report** link that opens the monthly compilation
+
+## Subjects
+
+Attendance sessions belong to a subject. Under the **Subjects** card on the
+dashboard you can add subjects (e.g. Mathematics, Physics, Chemistry) and delete
+them. Deleting a subject is only allowed while it has no attendance records.
+
+When a session starts you can pick which subject it belongs to. You can run
+**multiple sessions for the same subject on the same day** - just stop one
+session and start another. If no subject is created yet, sessions are assigned
+to the default **General** subject.
 
 ## Running an attendance session
 
-1. Click **Start Attendance** - a new QR code is generated with a fresh,
-   single-use session token.
-2. Students connect their phones to the **same Wi-Fi/LAN** as the server.
-3. Each student scans the QR and enters:
+1. (Optional) Add a subject and select it from the dropdown.
+2. Click **Start Attendance** - a new QR code is generated with a fresh,
+   single-use session token for that subject.
+3. Students connect their phones to the **same Wi-Fi/LAN** as the server.
+4. Each student scans the QR and enters:
    - **Student ID / Roll Number** (e.g. `24CS001`)
    - **Student Name**
-4. Click **Stop Attendance** when done. The QR (and its token) becomes invalid
-   immediately.
+5. Click **Stop Attendance** when done. The QR (and its token) becomes invalid
+   immediately. Start another session (same or different subject) whenever
+   needed in the same class period.
 
 !!! tip "Session expiry"
     A session automatically ends after **10 minutes**, even if you forget to stop
@@ -78,23 +93,34 @@ Click **Export CSV** on the dashboard to download `attendance_YYYY-MM-DD.csv`
 with that day's records:
 
 ```text
-Student ID,Student Name,Marked At,Session Token,IP Address
-24CS001,Aarav Pawar,2026-09-02 10:31:05,<token>,192.168.1.15
+Student ID,Student Name,Subject,Marked At,Session Token,IP Address
+24CS001,Aarav Pawar,Mathematics,2026-09-02 10:31:05,<token>,192.168.1.15
 ```
 
 ## Monthly report
 
-Click **Monthly Report** on the dashboard to see a per-student monthly summary.
-Use the month picker to select a month (it defaults to the current month). The
-report lists each student with the number of **distinct days attended** and the
-dates they attended - multiple sessions on the same calendar day count as a
-single day.
+Click **Monthly Report** on the dashboard. Use the month picker to select a
+month (it defaults to the current month).
 
-Click **Export CSV** on the monthly report to download `attendance_YYYY-MM.csv`:
+- With **All subjects** selected the report is a **student × subject matrix**:
+  each cell is the number of sessions that student attended for that subject in
+  the month, with a **Total** column.
+- Select a **specific subject** to see a per-student breakdown for that subject
+  only: total **sessions attended**, **distinct days** (multiple sessions the
+  same day count as one day), and the session dates.
+
+Click **Export CSV** on the monthly report to download the same data:
 
 ```text
-Student ID,Student Name,Days Attended,Distinct Dates
-24CS001,Aarav Pawar,18,2026-09-01, 2026-09-02, 2026-09-03, ...
+Student ID,Student Name,Mathematics,Physics,Total
+24CS001,Aarav Pawar,18,12,30
+```
+
+or, for a single subject:
+
+```text
+Student ID,Student Name,Sessions Attended,Distinct Days,Session Dates
+24CS001,Aarav Pawar,2,1,2026-09-01 (2)
 ```
 
 ## Storing data

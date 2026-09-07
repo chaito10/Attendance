@@ -9,14 +9,14 @@ Debian, Fedora, Arch, etc.). No Python is required for the pre-built binary.
    [releases page](https://github.com/chaito10/Attendance/releases/latest):
 
    ```bash
-   curl -L -o attendance-v0.1.1-linux-x86_64.tar.gz \
-     https://github.com/chaito10/Attendance/releases/download/v0.1.1/attendance-v0.1.1-linux-x86_64.tar.gz
+   curl -L -o attendance-v0.2.0-linux-x86_64.tar.gz \
+     https://github.com/chaito10/Attendance/releases/download/v0.2.0/attendance-v0.2.0-linux-x86_64.tar.gz
    ```
 
 2. Extract it and make it executable:
 
    ```bash
-   tar xzf attendance-v0.1.1-linux-x86_64.tar.gz
+   tar xzf attendance-v0.2.0-linux-x86_64.tar.gz
    chmod +x attendance
    ```
 
@@ -84,7 +84,7 @@ Open port **5000** so phones on the same LAN can reach the server:
 ## Verifying the download
 
 ```bash
-sha256sum attendance-v0.1.1-linux-x86_64.tar.gz
+sha256sum attendance-v0.2.0-linux-x86_64.tar.gz
 ```
 
 Compare the output against the hash published on the

@@ -351,6 +351,7 @@ DASHBOARD = """
         <h2>Today's Attendance</h2>
         <div class="actions">
             <a class="button secondary" href="{{ url_for('export_csv') }}">Export CSV</a>
+            <a class="button secondary" href="{{ url_for('monthly') }}">Monthly Report</a>
         </div>
         <br>
         {% if rows %}
@@ -376,6 +377,66 @@ DASHBOARD = """
         </table>
         {% else %}
             <p class="muted">No attendance recorded today.</p>
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>
+"""
+
+
+MONTHLY = """
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Monthly Attendance</title>
+    {{ style|safe }}
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <h1>Monthly Attendance</h1>
+        <p><a class="button secondary" href="{{ url_for('dashboard') }}">&larr; Back to Dashboard</a></p>
+        <form method="get" action="{{ url_for('monthly') }}">
+            <label for="month">Month</label>
+            <input id="month" name="month" type="month" value="{{ month }}" required>
+            <button class="success" type="submit">View Report</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="actions">
+            <h2 style="flex:1">{{ month_label }}</h2>
+            <a class="button secondary" href="{{ url_for('monthly_csv', month=month) }}">Export CSV</a>
+        </div>
+        <p class="muted">{{ days_in_month }} days in this month &mdash; counting distinct days attended per student.</p>
+        {% if rows %}
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Student ID</th>
+                    <th>Name</th>
+                    <th>Days Attended</th>
+                    <th>Distinct Dates</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for row in rows %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ row['student_id'] }}</td>
+                    <td>{{ row['student_name'] }}</td>
+                    <td>{{ row['days_attended'] }}</td>
+                    <td class="muted">{{ row['dates'] }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <p class="muted">No attendance recorded in this month.</p>
         {% endif %}
     </div>
 </div>
@@ -660,6 +721,110 @@ def session_count(token):
     ).fetchone()
     conn.close()
     return row["c"]
+
+
+def monthly_summary(month_str):
+    """Compile per-student distinct-day counts for a month (YYYY-MM)."""
+    month_prefix = month_str + "%"
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT student_id, student_name, marked_at
+        FROM attendance
+        WHERE marked_at LIKE ?
+        ORDER BY student_id, marked_at
+        """,
+        (month_prefix,),
+    ).fetchall()
+    conn.close()
+
+    by_student = {}
+    for row in rows:
+        sid = row["student_id"]
+        date = row["marked_at"][:10]
+        entry = by_student.setdefault(
+            sid, {"student_id": sid, "student_name": row["student_name"], "dates": set()}
+        )
+        entry["dates"].add(date)
+
+    summary = []
+    for entry in by_student.values():
+        summary.append(
+            {
+                "student_id": entry["student_id"],
+                "student_name": entry["student_name"],
+                "days_attended": len(entry["dates"]),
+                "dates": ", ".join(sorted(entry["dates"])),
+            }
+        )
+    summary.sort(key=lambda r: (r["student_id"].lower(), r["student_name"].lower()))
+    return summary
+
+
+@app.route("/monthly")
+def monthly():
+    gate = require_teacher()
+    if gate:
+        return gate
+
+    month = request.args.get("month", "").strip()
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+    try:
+        dt = datetime.strptime(month, "%Y-%m")
+    except ValueError:
+        month = datetime.now().strftime("%Y-%m")
+        dt = datetime.strptime(month, "%Y-%m")
+
+    import calendar as _calendar
+
+    total_days = _calendar.monthrange(dt.year, dt.month)[1]
+    return render_template_string(
+        MONTHLY,
+        style=BASE_STYLE,
+        month=month,
+        month_label=dt.strftime("%B %Y"),
+        days_in_month=total_days,
+        rows=monthly_summary(month),
+    )
+
+
+@app.route("/monthly.csv")
+def monthly_csv():
+    gate = require_teacher()
+    if gate:
+        return gate
+
+    month = request.args.get("month", "").strip()
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+    try:
+        dt = datetime.strptime(month, "%Y-%m")
+    except ValueError:
+        month = datetime.now().strftime("%Y-%m")
+        dt = datetime.strptime(month, "%Y-%m")
+
+    summary = monthly_summary(month)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Student ID", "Student Name", "Days Attended", "Distinct Dates"])
+
+    for row in summary:
+        writer.writerow(
+            [
+                row["student_id"],
+                row["student_name"],
+                row["days_attended"],
+                row["dates"],
+            ]
+        )
+
+    filename = f"attendance_{month}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.route("/export.csv")

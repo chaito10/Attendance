@@ -23,6 +23,8 @@ database.
   different ID cannot double-register
 - Attendance is written to a local SQLite database
 - CSV export of the day's attendance
+- **Monthly attendance report** — pick a month to see per-student distinct days
+  attended, with CSV export
 - Sessions auto-expire after 10 minutes
 
 ## Install
@@ -41,13 +43,13 @@ scoop install attendance
 
 ### Windows / Linux / macOS (download)
 
-Download `attendance-v0.1.1-win64.zip` (Windows), or the
-`attendance-v0.1.1-linux-x86_64.tar.gz` / `attendance-v0.1.1-macos-arm64.tar.gz` /
-`attendance-v0.1.1-macos-x86_64.tar.gz` archives for Unix, from the
+Download `attendance-v0.2.0-win64.zip` (Windows), or the
+`attendance-v0.2.0-linux-x86_64.tar.gz` / `attendance-v0.2.0-macos-arm64.tar.gz` /
+`attendance-v0.2.0-macos-x86_64.tar.gz` archives for Unix, from the
 [releases page](https://github.com/chaito10/Attendance/releases/latest). On Unix:
 
 ```bash
-tar xzf attendance-v0.1.1-linux-x86_64.tar.gz
+tar xzf attendance-v0.2.0-linux-x86_64.tar.gz
 chmod +x attendance
 ./attendance
 ```

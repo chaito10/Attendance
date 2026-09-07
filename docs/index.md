@@ -16,6 +16,7 @@ No cloud, no accounts, no student data leaving the classroom network.
 - **One registration per student** per session (duplicate IDs are rejected)
 - **Sessions expire automatically** after 10 minutes
 - **CSV export** of the day's attendance
+- **Monthly report** - per-student distinct days attended, with CSV export
 - **Served by Waitress** in production (multi-threaded, production-grade WSGI)
 - **Cross-platform** - Windows, Linux, and macOS binaries
 
@@ -23,13 +24,13 @@ No cloud, no accounts, no student data leaving the classroom network.
 
 | Platform | Binary | Install |
 |----------|--------|---------|
-| Windows | `attendance-v0.1.1-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
-| Linux x86_64 | `attendance-v0.1.1-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
-| macOS arm64 | `attendance-v0.1.1-macos-arm64.tar.gz` | [Manual](install/macos.md) |
-| macOS x86_64 | `attendance-v0.1.1-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
+| Windows | `attendance-v0.2.0-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
+| Linux x86_64 | `attendance-v0.2.0-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
+| macOS arm64 | `attendance-v0.2.0-macos-arm64.tar.gz` | [Manual](install/macos.md) |
+| macOS x86_64 | `attendance-v0.2.0-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
 | Any (from source) | Python with uv | [Development](development.md) |
 
-> **Newest release:** [v0.1.1](https://github.com/chaito10/Attendance/releases/latest)
+> **Newest release:** [v0.2.0](https://github.com/chaito10/Attendance/releases/latest)
 > - all binaries are attached to the release page.
 
 ## Quick start

@@ -43,6 +43,7 @@ Press **Ctrl+C** to stop.
    - The live QR code and the scan URL
    - The number of students scanned so far
    - **Today's attendance** table with an **Export CSV** button
+   - A **Monthly Report** link that opens the monthly compilation
 
 ## Running an attendance session
 
@@ -79,6 +80,21 @@ with that day's records:
 ```text
 Student ID,Student Name,Marked At,Session Token,IP Address
 24CS001,Aarav Pawar,2026-09-02 10:31:05,<token>,192.168.1.15
+```
+
+## Monthly report
+
+Click **Monthly Report** on the dashboard to see a per-student monthly summary.
+Use the month picker to select a month (it defaults to the current month). The
+report lists each student with the number of **distinct days attended** and the
+dates they attended - multiple sessions on the same calendar day count as a
+single day.
+
+Click **Export CSV** on the monthly report to download `attendance_YYYY-MM.csv`:
+
+```text
+Student ID,Student Name,Days Attended,Distinct Dates
+24CS001,Aarav Pawar,18,2026-09-01, 2026-09-02, 2026-09-03, ...
 ```
 
 ## Storing data

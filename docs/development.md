@@ -86,8 +86,8 @@ on every push to `main` (`.github/workflows/docs.yml`).
 1. Bump `version` in `pyproject.toml`.
 2. Add a `CHANGELOG.md` entry.
 3. Commit and push to `main`.
-4. Create and push an annotated tag: `git tag -a v0.1.1 -m "v0.1.1"` then
-   `git push origin v0.1.1`.
+4. Create and push an annotated tag: `git tag -a v0.2.0 -m "v0.2.0"` then
+   `git push origin v0.2.0`.
 5. CI builds all platform binaries, creates the release, and attaches the
    artifacts.
 6. Update the Scoop manifest in `chaito10/scoop-bucket` with the new version and

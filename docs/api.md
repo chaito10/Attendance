@@ -102,6 +102,31 @@ Requires a teacher session. Downloads the day's attendance as a CSV attachment:
 Student ID,Student Name,Marked At,Session Token,IP Address
 ```
 
+### `GET /monthly`
+
+Requires a teacher session. Renders the monthly attendance report.
+
+Query params:
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `month` | string | current month | The month to report, `YYYY-MM`. |
+
+The report lists each student with the number of **distinct days attended** in
+that month (multiple sessions on the same calendar day count once) and the
+dates they attended.
+
+### `GET /monthly.csv`
+
+Requires a teacher session. Downloads the monthly compilation as a CSV
+attachment:
+
+`attendance_YYYY-MM.csv`
+
+```text
+Student ID,Student Name,Days Attended,Distinct Dates
+```
+
 ## Authentication
 
 - **Teacher endpoints:** gated by a signed session cookie flag (`teacher=true`),

@@ -46,13 +46,13 @@ scoop install attendance
 
 ### Windows / Linux / macOS (download)
 
-Download `attendance-v0.3.0-win64.zip` (Windows), or the
-`attendance-v0.3.0-linux-x86_64.tar.gz` / `attendance-v0.3.0-macos-arm64.tar.gz` /
-`attendance-v0.3.0-macos-x86_64.tar.gz` archives for Unix, from the
+Download `attendance-v0.3.1-win64.zip` (Windows), or the
+`attendance-v0.3.1-linux-x86_64.tar.gz` / `attendance-v0.3.1-macos-arm64.tar.gz` /
+`attendance-v0.3.1-macos-x86_64.tar.gz` archives for Unix, from the
 [releases page](https://github.com/chaito10/Attendance/releases/latest). On Unix:
 
 ```bash
-tar xzf attendance-v0.3.0-linux-x86_64.tar.gz
+tar xzf attendance-v0.3.1-linux-x86_64.tar.gz
 chmod +x attendance
 ./attendance
 ```
@@ -118,6 +118,7 @@ network. The teacher may also share the printed URL directly.
 | `ATTENDANCE_PASSWORD`| Teacher password for the dashboard. If unset, a random one is generated and printed at startup. |
 | `ATTENDANCE_SECRET`  | Flask session signing key. Optional; generated at runtime if unset. |
 | `ATTENDANCE_DB`      | Path to the SQLite database file. Defaults to `attendance.db` in the working directory. |
+| `ATTENDANCE_URL`     | Public base URL (e.g. `https://attendance.example.com`) used in the QR and scan links. Set it when exposing the app through a Cloudflare Tunnel or reverse proxy; defaults to the detected LAN IP. |
 
 Example:
 

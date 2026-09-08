@@ -1,6 +1,6 @@
 [project]
 name = "attendance"
-version = "0.3.0"
+version = "0.3.1"
 description = "Single-file QR Attendance System"
 readme = "README.md"
 license = "MIT"

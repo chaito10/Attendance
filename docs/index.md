@@ -27,13 +27,13 @@ No cloud, no accounts, no student data leaving the classroom network.
 
 | Platform | Binary | Install |
 |----------|--------|---------|
-| Windows | `attendance-v0.3.0-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
-| Linux x86_64 | `attendance-v0.3.0-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
-| macOS arm64 | `attendance-v0.3.0-macos-arm64.tar.gz` | [Manual](install/macos.md) |
-| macOS x86_64 | `attendance-v0.3.0-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
+| Windows | `attendance-v0.3.1-win64.zip` | [Scoop](install/windows.md) or [manual](install/windows.md) |
+| Linux x86_64 | `attendance-v0.3.1-linux-x86_64.tar.gz` | [Manual](install/linux.md) |
+| macOS arm64 | `attendance-v0.3.1-macos-arm64.tar.gz` | [Manual](install/macos.md) |
+| macOS x86_64 | `attendance-v0.3.1-macos-x86_64.tar.gz` | [Manual](install/macos.md) |
 | Any (from source) | Python with uv | [Development](development.md) |
 
-> **Newest release:** [v0.3.0](https://github.com/chaito10/Attendance/releases/latest)
+> **Newest release:** [v0.3.1](https://github.com/chaito10/Attendance/releases/latest)
 > - all binaries are attached to the release page.
 
 ## Quick start

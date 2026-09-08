@@ -140,6 +140,7 @@ Use `ATTENDANCE_DB` to point at a different location (useful under
 | `TEACHER_PASSWORD` | same as `ATTENDANCE_PASSWORD` | Legacy alias for the teacher password. |
 | `ATTENDANCE_SECRET` | random at startup | Flask session signing key. Set it to keep logins valid across restarts. |
 | `ATTENDANCE_DB` | `attendance.db` in the working directory | Path to the SQLite database file. |
+| `ATTENDANCE_URL` | detected LAN IP | Public base URL (e.g. `https://attendance.example.com`) used in the QR and scan links. Set it when students can't reach the classroom LAN - e.g. when exposing the app through a Cloudflare Tunnel. |
 
 !!! warning "Security model"
     This tool is designed for a **trusted classroom LAN**. The session token in
@@ -153,6 +154,33 @@ Use `ATTENDANCE_DB` to point at a different location (useful under
   reach it.
 - Students must be on the **same network** as the server; they cannot scan from
   outside the LAN.
+
+### Reaching students without classroom Wi-Fi
+
+If the classroom Wi-Fi/LAN is unreliable (or students are on mobile data), you
+can expose the app publicly with a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/):
+
+1. Install [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+2. Start the app:
+   ```bash
+   ATTENDANCE_URL=https://<your-public-host> attendance
+   ```
+3. Point a tunnel at the app (quick tunnel for a one-off class, or a named
+   tunnel with a custom domain for regular use):
+   ```bash
+   cloudflared tunnel --url http://localhost:5000
+   ```
+
+With `ATTENDANCE_URL` set, the QR code and the scan link shown on the dashboard
+point at the public host, so students can scan from anywhere. Without it, the QR
+would still encode the private LAN IP and fail for off-LAN students.
+
+!!! warning "Tunneling exposes the app to the internet"
+    Re-read the [security model](#environment-variables) above before tunneling.
+    While a session is active, anyone with the public URL and token can mark
+    attendance. Use a strong `ATTENDANCE_PASSWORD`, and consider protecting the
+    dashboard routes with [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/)
+    (leave `/attend/*` public so students can check in).
 - The server binds `0.0.0.0` (all interfaces) by default. See each platform's
   install guide for firewall instructions:
   - [Windows](install/windows.md#firewall)

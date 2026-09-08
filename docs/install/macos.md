@@ -7,8 +7,8 @@ Choose the archive that matches your Mac:
 
 | Mac | Architecture | Archive |
 |-----|--------------|---------|
-| Apple Silicon (M1/M2/M3/M4) | arm64 | `attendance-v0.3.0-macos-arm64.tar.gz` |
-| Intel | x86_64 | `attendance-v0.3.0-macos-x86_64.tar.gz` |
+| Apple Silicon (M1/M2/M3/M4) | arm64 | `attendance-v0.3.1-macos-arm64.tar.gz` |
+| Intel | x86_64 | `attendance-v0.3.1-macos-x86_64.tar.gz` |
 
 ## Install the binary
 
@@ -16,14 +16,14 @@ Choose the archive that matches your Mac:
    [releases page](https://github.com/chaito10/Attendance/releases/latest):
 
    ```bash
-   curl -L -o attendance-v0.3.0-macos-arm64.tar.gz \
-     https://github.com/chaito10/Attendance/releases/download/v0.3.0/attendance-v0.3.0-macos-arm64.tar.gz
+   curl -L -o attendance-v0.3.1-macos-arm64.tar.gz \
+     https://github.com/chaito10/Attendance/releases/download/v0.3.1/attendance-v0.3.1-macos-arm64.tar.gz
    ```
 
 2. Extract it and make it executable:
 
    ```bash
-   tar xzf attendance-v0.3.0-macos-arm64.tar.gz
+   tar xzf attendance-v0.3.1-macos-arm64.tar.gz
    chmod +x attendance
    ```
 

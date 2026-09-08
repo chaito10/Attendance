@@ -36,6 +36,8 @@ Notes:
 - ATTENDANCE_PASSWORD: teacher dashboard password
 - ATTENDANCE_SECRET: Flask session signing key (optional)
 - ATTENDANCE_DB: path to the SQLite database file (optional)
+- ATTENDANCE_URL: public base URL (scheme://host[:port]) used in the QR and
+  scan links, e.g. a Cloudflare Tunnel hostname. Defaults to the detected LAN IP.
 """
 
 import argparse
@@ -230,11 +232,18 @@ def local_ip():
         return "127.0.0.1"
 
 
-def attendance_url():
-    ip = local_ip()
+def public_base_url():
+    """Public origin for QR/scan links: ATTENDANCE_URL override or LAN IP."""
+    override = os.environ.get("ATTENDANCE_URL", "").strip().rstrip("/")
+    if override:
+        return override
     port = request.host.split(":")[-1] if ":" in request.host else "5000"
+    return f"http://{local_ip()}:{port}"
+
+
+def attendance_url():
     token = state["token"]
-    return f"http://{ip}:{port}/attend/{token}"
+    return f"{public_base_url()}/attend/{token}"
 
 
 def client_ip():
@@ -738,7 +747,7 @@ def dashboard():
         subjects=subjects,
         active_subject=active_subject,
         attend_url=(
-            f"http://{local_ip()}:{request.host.split(':')[-1]}/attend/{s['token']}"
+            f"{public_base_url()}/attend/{s['token']}"
             if s["token"]
             else ""
         ),
@@ -864,7 +873,7 @@ def qr_image():
     if not s["active"] or not s["token"]:
         return Response(status=404)
 
-    target = f"http://{local_ip()}:{request.host.split(':')[-1]}/attend/{s['token']}"
+    target = f"{public_base_url()}/attend/{s['token']}"
 
     qr = qrcode.QRCode(
         version=None,
@@ -1324,6 +1333,9 @@ def main(argv=None):
     print("=" * 60)
     print(f"Teacher dashboard: http://127.0.0.1:{args.port}/")
     print(f"LAN dashboard:     http://{local_ip()}:{args.port}/")
+    external = os.environ.get("ATTENDANCE_URL", "").strip().rstrip("/")
+    if external:
+        print(f"Public dashboard:  {external}/")
     print()
     print("The teacher dashboard is password protected.")
     if not os.environ.get("ATTENDANCE_PASSWORD") and not os.environ.get(
@@ -1334,7 +1346,10 @@ def main(argv=None):
     else:
         print("Use your configured ATTENDANCE_PASSWORD to log in.")
     print()
-    print("Students must be connected to the same Wi-Fi/LAN.")
+    if external:
+        print("Students scan via the public URL (e.g. a Cloudflare Tunnel).")
+    else:
+        print("Students must be connected to the same Wi-Fi/LAN.")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     print()

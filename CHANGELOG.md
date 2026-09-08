@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1] - 2026-09-07
+
+### Added
+
+- `ATTENDANCE_URL` environment variable - sets the public base URL used in the
+  QR code and scan links (e.g. a Cloudflare Tunnel hostname) so students can
+  check in without reaching the classroom LAN. Falls back to the detected LAN IP
+  when unset.
+
+### Changed
+
+- Version bumped to 0.3.1
+
 ## [v0.3.0] - 2026-09-07
 
 ### Added
